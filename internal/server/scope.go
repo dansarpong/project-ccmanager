@@ -3,6 +3,7 @@ package server
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -36,15 +37,17 @@ func (sc scope) deleteRefusal() string {
 	return "only CLAUDE.md, CLAUDE.local.md, rules and auto memory files can be moved to the trash"
 }
 
-// scopeRoots are the directories that decide a file's scope.
+// scopeRoots are the directories that decide a file's scope, and the OS, which
+// decides whether comparing paths ignores case.
 type scopeRoots struct {
 	configRoot       string
 	projectsDir      string
 	managedPolicyDir string
+	goos             string
 }
 
 func (s *Server) memoryScope(path string) scope {
-	return classify(path, scopeRoots{configRoot: s.cfg.ConfigRoot, projectsDir: s.cfg.ProjectsDir, managedPolicyDir: managedPolicyDir})
+	return classify(path, scopeRoots{configRoot: s.cfg.ConfigRoot, projectsDir: s.cfg.ProjectsDir, managedPolicyDir: managedPolicyDir, goos: runtime.GOOS})
 }
 
 // classify returns path's scope. Only an existing regular file can be in
@@ -57,11 +60,17 @@ func classify(path string, roots scopeRoots) scope {
 	if info, err := os.Stat(p); err != nil || !info.Mode().IsRegular() {
 		return scopeOutside
 	}
+	return roots.pathScope(p)
+}
+
+// pathScope applies the name and directory rules to the absolute path p,
+// without looking at the filesystem.
+func (r scopeRoots) pathScope(p string) scope {
 	md := strings.EqualFold(filepath.Ext(p), ".md")
 	switch {
-	case within(roots.managedPolicyDir, p):
+	case r.within(r.managedPolicyDir, p):
 		return scopeManaged
-	case isAutoMemoryPath(roots.projectsDir, p):
+	case r.isAutoMemoryPath(p):
 		if md {
 			return scopeAutoMemory
 		}
@@ -70,15 +79,24 @@ func classify(path string, roots scopeRoots) scope {
 	if base := filepath.Base(p); base == "CLAUDE.md" || base == "CLAUDE.local.md" {
 		return scopeEditable
 	}
-	if md && (within(filepath.Join(roots.configRoot, "rules"), p) || inClaudeRules(p)) {
+	if md && (r.within(filepath.Join(r.configRoot, "rules"), p) || r.inClaudeRules(p)) {
 		return scopeEditable
 	}
 	return scopeOutside
 }
 
+// fold lower-cases p on darwin and windows, whose filesystems ignore case by
+// default, so /library/… is still the managed-policy directory there.
+func (r scopeRoots) fold(p string) string {
+	if r.goos == "darwin" || r.goos == "windows" {
+		return strings.ToLower(p)
+	}
+	return p
+}
+
 // relInside returns the absolute path p relative to root, if p lies strictly
-// inside root.
-func relInside(root, p string) (string, bool) {
+// inside root. The result is case-folded where the filesystem ignores case.
+func (r scopeRoots) relInside(root, p string) (string, bool) {
 	if root == "" {
 		return "", false
 	}
@@ -86,29 +104,29 @@ func relInside(root, p string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	rel, err := filepath.Rel(abs, p)
+	rel, err := filepath.Rel(r.fold(abs), r.fold(p))
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", false
 	}
 	return rel, true
 }
 
-func within(root, p string) bool {
-	_, ok := relInside(root, p)
+func (r scopeRoots) within(root, p string) bool {
+	_, ok := r.relInside(root, p)
 	return ok
 }
 
 // isAutoMemoryPath reports whether p lies inside a project's auto-memory
 // directory: <projectsDir>/<project>/memory/….
-func isAutoMemoryPath(projectsDir, p string) bool {
-	rel, ok := relInside(projectsDir, p)
+func (r scopeRoots) isAutoMemoryPath(p string) bool {
+	rel, ok := r.relInside(r.projectsDir, p)
 	parts := strings.Split(filepath.ToSlash(rel), "/")
 	return ok && len(parts) >= 3 && parts[1] == "memory"
 }
 
 // inClaudeRules reports whether p lies under a .claude/rules/ directory.
-func inClaudeRules(p string) bool {
-	parts := strings.Split(filepath.ToSlash(p), "/")
+func (r scopeRoots) inClaudeRules(p string) bool {
+	parts := strings.Split(filepath.ToSlash(r.fold(p)), "/")
 	for i := 0; i+2 < len(parts); i++ {
 		if parts[i] == ".claude" && parts[i+1] == "rules" {
 			return true

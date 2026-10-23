@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dansarpong/ccmanager/internal/memory"
 	"github.com/dansarpong/ccmanager/internal/safeio"
 )
 
@@ -82,6 +83,48 @@ func TestClassify(t *testing.T) {
 		if sc.editable() != wantEditable[sc] || sc.deletable() != wantDeletable[sc] {
 			t.Errorf("scope %d: editable=%v deletable=%v", sc, sc.editable(), sc.deletable())
 		}
+	}
+}
+
+func TestClassifyFoldsCaseOnDarwinAndWindows(t *testing.T) {
+	root := t.TempDir()
+	managed := filepath.Join(root, "managed", "CLAUDE.md")
+	autoMemory := filepath.Join(root, "config", "projects", "-work", "Memory", "CLAUDE.md")
+	rule := filepath.Join(root, "work", ".Claude", "Rules", "x.md")
+	userRule := filepath.Join(root, "config", "rules", "u.md")
+	for _, p := range []string{managed, autoMemory, rule, userRule} {
+		writeTestFile(t, p, "x\n")
+	}
+	cases := []struct {
+		path          string
+		folded, exact scope
+	}{
+		{managed, scopeManaged, scopeEditable},
+		{autoMemory, scopeAutoMemory, scopeEditable},
+		{rule, scopeEditable, scopeOutside},
+		{userRule, scopeEditable, scopeOutside},
+	}
+	for _, goos := range []string{"darwin", "windows", "linux"} {
+		roots := scopeRoots{
+			configRoot:       filepath.Join(root, "CONFIG"),
+			projectsDir:      filepath.Join(root, "Config", "Projects"),
+			managedPolicyDir: filepath.Join(root, "Managed"),
+			goos:             goos,
+		}
+		for _, c := range cases {
+			want := c.folded
+			if goos == "linux" {
+				want = c.exact
+			}
+			if got := classify(c.path, roots); got != want {
+				t.Errorf("%s: classify(%s) = %d, want %d", goos, c.path, got, want)
+			}
+		}
+	}
+
+	darwin := scopeRoots{managedPolicyDir: memory.ManagedDir("darwin"), goos: "darwin"}
+	if got := darwin.pathScope("/library/application support/claudecode/CLAUDE.md"); got != scopeManaged {
+		t.Errorf("darwin managed policy in lower case = %d, want %d", got, scopeManaged)
 	}
 }
 
