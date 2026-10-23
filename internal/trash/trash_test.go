@@ -36,7 +36,7 @@ func TestMoveAndRestore(t *testing.T) {
 		t.Error("original should be gone after MoveToTrash")
 	}
 
-	if _, err := tr.Restore(id); err != nil {
+	if _, err := tr.Restore(id, now); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
 	got, err := os.ReadFile(orig)
@@ -54,7 +54,7 @@ func TestRestoreRefusesToClobber(t *testing.T) {
 
 	// Recreate a file at the original path; restore must refuse.
 	os.WriteFile(orig, []byte("new content"), 0o644)
-	if _, err := tr.Restore(id); err == nil {
+	if _, err := tr.Restore(id, now); err == nil {
 		t.Error("Restore should refuse to overwrite an existing file")
 	}
 }

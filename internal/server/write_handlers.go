@@ -240,7 +240,7 @@ func (s *Server) handleTrashRestore(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad id", http.StatusBadRequest)
 		return
 	}
-	entry, err := s.trash.Restore(id)
+	entry, err := s.trash.Restore(id, time.Now())
 	if err != nil {
 		s.fail(w, "restoring", err)
 		return
@@ -252,7 +252,7 @@ func (s *Server) handleTrashRestore(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	http.Redirect(w, r, "/trash", http.StatusSeeOther)
+	redirectAfterPost(w, r, "/trash")
 }
 
 func (s *Server) handleTrashEmpty(w http.ResponseWriter, r *http.Request) {

@@ -29,9 +29,17 @@
           <span class="badge">{{if eq .Kind "session"}}Session{{else if eq .Kind "memory-backup"}}Backup{{else}}Memory file{{end}}</span>
           <time class="session-item__time" datetime="{{.DeletedAt}}" title="{{prettyTime .DeletedAt}}">{{relTime .DeletedAt}}</time>
           <time class="session-item__time" datetime="{{.PurgeAfter}}" title="{{prettyTime .PurgeAfter}}">{{relTime .PurgeAfter}}</time>
+          {{if eq .Kind "memory-backup"}}
+          <form method="post" action="/trash/{{.ID}}/restore"
+                hx-post="/trash/{{.ID}}/restore" hx-sync="this:drop"
+                hx-confirm="Replace the current file with this version? The current version moves to the trash.">
+            <button class="btn btn--ghost" type="submit">Roll back</button>
+          </form>
+          {{else}}
           <form method="post" action="/trash/{{.ID}}/restore">
             <button class="btn btn--ghost" type="submit">Restore</button>
           </form>
+          {{end}}
         </div>
       </li>
       {{end}}

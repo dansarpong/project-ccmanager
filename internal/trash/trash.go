@@ -1,7 +1,8 @@
 // Package trash implements the safe deletion model: deleting a file moves it
 // into an app-managed trash directory with a manifest entry, restorable for 30
 // days, after which it is purged. Overwrites first back up the current file
-// into trash. Nothing here deletes user data outright.
+// into trash, and rolling back to a backup backs up the version it replaces.
+// Nothing here deletes user data outright.
 package trash
 
 import (
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/dansarpong/ccmanager/internal/safeio"
 	"github.com/dansarpong/ccmanager/internal/store"
 )
 
@@ -64,11 +66,9 @@ func (t *Trash) stash(kind, path, sessionID, note string, now time.Time, move bo
 		return 0, fmt.Errorf("creating trash dir: %w", err)
 	}
 
-	// Each entry gets its own subdirectory keyed by a timestamp, so files with
-	// the same basename never collide.
-	sub := filepath.Join(t.trashDir, strconv.FormatInt(now.UnixNano(), 10))
-	if err := os.MkdirAll(sub, 0o755); err != nil {
-		return 0, fmt.Errorf("creating trash entry dir: %w", err)
+	sub, err := t.newEntryDir(now)
+	if err != nil {
+		return 0, err
 	}
 	dst := filepath.Join(sub, filepath.Base(path))
 	if err := copyFile(path, dst); err != nil {
@@ -96,15 +96,35 @@ func (t *Trash) stash(kind, path, sessionID, note string, now time.Time, move bo
 	return id, nil
 }
 
+// newEntryDir creates the directory for a new trash entry. Each entry gets its
+// own subdirectory keyed by a timestamp, so files with the same basename never
+// collide; a timestamp already taken is bumped rather than shared.
+func (t *Trash) newEntryDir(now time.Time) (string, error) {
+	for ns := now.UnixNano(); ; ns++ {
+		dir := filepath.Join(t.trashDir, strconv.FormatInt(ns, 10))
+		err := os.Mkdir(dir, 0o755)
+		if err == nil {
+			return dir, nil
+		}
+		if !os.IsExist(err) {
+			return "", fmt.Errorf("creating trash entry dir: %w", err)
+		}
+	}
+}
+
 // Restore moves a trashed file back to its original path and removes the
 // manifest entry. It refuses to overwrite a file that already exists at the
-// original path.
-func (t *Trash) Restore(id int64) (store.TrashEntry, error) {
+// original path, except for a backup: rolling back to one replaces the current
+// file, which is first backed up as a new entry dated now.
+func (t *Trash) Restore(id int64, now time.Time) (store.TrashEntry, error) {
 	e, err := t.store.GetTrash(id)
 	if err != nil {
 		return store.TrashEntry{}, fmt.Errorf("looking up trash entry %d: %w", id, err)
 	}
-	if _, err := os.Stat(e.OriginalPath); err == nil {
+	if e.Kind == KindMemoryBackup && exists(e.OriginalPath) {
+		return e, t.rollBack(e, now)
+	}
+	if exists(e.OriginalPath) {
 		return e, fmt.Errorf("cannot restore: a file already exists at %s", e.OriginalPath)
 	}
 	if err := os.MkdirAll(filepath.Dir(e.OriginalPath), 0o755); err != nil {
@@ -121,6 +141,38 @@ func (t *Trash) Restore(id int64) (store.TrashEntry, error) {
 		return e, err
 	}
 	return e, nil
+}
+
+// rollBack swaps a backup in for the file at its original path, backing up the
+// current version first so the swap can itself be undone.
+func (t *Trash) rollBack(e store.TrashEntry, now time.Time) error {
+	data, err := os.ReadFile(e.TrashPath)
+	if err != nil {
+		return fmt.Errorf("reading backup: %w", err)
+	}
+	mode := os.FileMode(0o644)
+	if info, err := os.Stat(e.OriginalPath); err == nil {
+		mode = info.Mode().Perm()
+	} else if info, err := os.Stat(e.TrashPath); err == nil {
+		mode = info.Mode().Perm()
+	}
+	if _, err := t.BackupBeforeWrite(e.OriginalPath, now); err != nil {
+		return fmt.Errorf("backing up the current version: %w", err)
+	}
+	if err := safeio.AtomicWrite(e.OriginalPath, data, mode); err != nil {
+		return err
+	}
+	if err := os.Remove(e.TrashPath); err != nil {
+		return fmt.Errorf("removing backup after roll back: %w", err)
+	}
+	_ = os.Remove(filepath.Dir(e.TrashPath))
+	return t.store.DeleteTrash(e.ID)
+}
+
+// exists reports whether anything, even a dangling symlink, is at path.
+func exists(path string) bool {
+	_, err := os.Lstat(path)
+	return err == nil
 }
 
 // PurgeExpired deletes trash entries whose retention window has passed. now is

@@ -1,0 +1,92 @@
+package server
+
+import (
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/dansarpong/ccmanager/internal/config"
+	"github.com/dansarpong/ccmanager/internal/store"
+	"github.com/dansarpong/ccmanager/internal/trash"
+)
+
+// newTrashTestServer builds a server over an empty temp config root and also
+// returns its trash and store, so tests can stage entries directly.
+func newTrashTestServer(t *testing.T) (http.Handler, *trash.Trash, *store.Store, config.Config) {
+	t.Helper()
+	root := t.TempDir()
+	cfg := config.Config{
+		ConfigRoot:  root,
+		ProjectsDir: filepath.Join(root, "projects"),
+		DataDir:     filepath.Join(root, "ccmanager"),
+		TrashDir:    filepath.Join(root, "ccmanager", "trash"),
+		DBPath:      filepath.Join(root, "ccmanager", "index.db"),
+	}
+	if err := cfg.EnsureDataDirs(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(cfg.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	tr := trash.New(st, cfg.TrashDir)
+	srv, err := New(cfg, st, tr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return srv.Routes(), tr, st, cfg
+}
+
+func readBody(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func TestTrashRollBackSwapsBackup(t *testing.T) {
+	h, tr, st, cfg := newTrashTestServer(t)
+	path := filepath.Join(cfg.ConfigRoot, "CLAUDE.md")
+	if err := os.WriteFile(path, []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	id, err := tr.BackupBeforeWrite(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("v2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	restore := fmt.Sprintf("/trash/%d/restore", id)
+	assertContains(t, "trash", do(t, h, "GET", "/trash", nil, false).Body.String(),
+		`action="`+restore+`"`, `hx-post="`+restore+`"`, "Roll back",
+		`hx-confirm="Replace the current file with this version?`)
+
+	rec := do(t, h, "POST", restore, nil, false)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/trash" {
+		t.Fatalf("plain roll back = %d to %q: %s", rec.Code, rec.Header().Get("Location"), rec.Body.String())
+	}
+	if got := readBody(t, path); got != "v1" {
+		t.Errorf("after roll back content = %q, want v1", got)
+	}
+
+	// The replaced version is restorable, here through htmx.
+	entries, err := st.ListTrash()
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("trash after roll back = %+v err=%v, want the replaced version", entries, err)
+	}
+	rec = do(t, h, "POST", fmt.Sprintf("/trash/%d/restore", entries[0].ID), nil, true)
+	if rec.Code != http.StatusOK || rec.Header().Get("HX-Redirect") != "/trash" {
+		t.Fatalf("htmx roll back = %d, HX-Redirect %q: %s", rec.Code, rec.Header().Get("HX-Redirect"), rec.Body.String())
+	}
+	if got := readBody(t, path); got != "v2" {
+		t.Errorf("after undoing the roll back content = %q, want v2", got)
+	}
+}
