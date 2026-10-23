@@ -205,5 +205,24 @@ func TestFriendlyErrorsFallsBackWhenRenderFails(t *testing.T) {
 		if got := rec.Header().Get("HX-Retarget"); got != "" {
 			t.Errorf("htmx=%v: fallback should not retarget, got %q", htmx, got)
 		}
+		if got, want := rec.Header().Get("HX-Reswap"), map[bool]string{true: "none"}[htmx]; got != want {
+			t.Errorf("htmx=%v: HX-Reswap = %q, want %q", htmx, got, want)
+		}
+	}
+}
+
+func TestResponsesForbidFraming(t *testing.T) {
+	h, _ := newTestServer(t)
+	for _, host := range []string{"127.0.0.1:8765", "evil.example:8765"} {
+		req := httptest.NewRequest("GET", "/sessions", nil)
+		req.Host = host
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if got := rec.Header().Get("X-Frame-Options"); got != "DENY" {
+			t.Errorf("%s: X-Frame-Options = %q, want DENY", host, got)
+		}
+		if got := rec.Header().Get("Content-Security-Policy"); got != "frame-ancestors 'none'" {
+			t.Errorf("%s: Content-Security-Policy = %q", host, got)
+		}
 	}
 }

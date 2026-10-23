@@ -101,6 +101,10 @@ func (s *Server) renderError(w http.ResponseWriter, r *http.Request, code int, m
 	}
 	var buf bytes.Buffer
 	if err := s.tmpl.ExecuteTemplate(&buf, name, data); err != nil {
+		if isHTMX(r) {
+			// htmx swaps 4xx/5xx, and would insert this raw text as HTML.
+			h.Set("HX-Reswap", "none")
+		}
 		http.Error(w, msg, code)
 		return
 	}

@@ -86,11 +86,15 @@ func (s *Server) Routes() http.Handler {
 	return localOnly(http.NewCrossOriginProtection().Handler(s.friendlyErrors(mux)))
 }
 
-// localOnly rejects requests not addressed to a loopback host name. Binding
-// 127.0.0.1 doesn't stop DNS rebinding: a page on a domain re-pointed at
-// 127.0.0.1 is same-origin to the browser, and only its Host header gives it away.
+// localOnly rejects requests not addressed to a loopback host name, and
+// forbids framing. Binding 127.0.0.1 doesn't stop DNS rebinding: a page on a
+// domain re-pointed at 127.0.0.1 is same-origin to the browser, and only its
+// Host header gives it away.
 func localOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Clicks inside a framed ccmanager are same-origin, so CrossOriginProtection can't catch them.
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
 		host, _, err := net.SplitHostPort(r.Host)
 		if err != nil {
 			host = r.Host
