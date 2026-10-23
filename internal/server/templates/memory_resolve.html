@@ -65,7 +65,7 @@
           </div>
         </details>
         <div class="memory-entry__actions">
-          <a class="btn btn--ghost btn--icon" href="/memory/edit?path={{.Path}}" aria-label="Edit" title="Edit">{{template "icon" "i-edit"}}</a>
+          {{if index $.Editable .Path}}<a class="btn btn--ghost btn--icon" href="/memory/edit?path={{.Path}}" aria-label="Edit" title="Edit">{{template "icon" "i-edit"}}</a>{{end}}
         </div>
       </li>
       {{end}}

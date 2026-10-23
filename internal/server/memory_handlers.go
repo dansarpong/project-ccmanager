@@ -70,7 +70,12 @@ func (s *Server) handleMemoryResolve(w http.ResponseWriter, r *http.Request) {
 			s.fail(w, "resolving memory", err)
 			return
 		}
+		editable := map[string]bool{}
+		for _, src := range stack.Sources {
+			editable[src.Path] = s.memoryScope(src.Path).editable()
+		}
 		data["Stack"] = stack
+		data["Editable"] = editable
 		data["Findings"] = advisor.Lint(stack)
 	}
 	s.page(w, r, "memory_resolve.html", data)

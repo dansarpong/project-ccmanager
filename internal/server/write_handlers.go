@@ -22,6 +22,9 @@ func (s *Server) handleMemoryEdit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing path", http.StatusBadRequest)
 		return
 	}
+	if fileMissing(w, path) {
+		return
+	}
 	if sc := s.memoryScope(path); !sc.editable() {
 		http.Error(w, sc.editRefusal(), http.StatusForbidden)
 		return
@@ -60,6 +63,9 @@ func (s *Server) handleMemorySave(w http.ResponseWriter, r *http.Request) {
 
 	if path == "" {
 		http.Error(w, "missing path", http.StatusBadRequest)
+		return
+	}
+	if fileMissing(w, path) {
 		return
 	}
 	if sc := s.memoryScope(path); !sc.editable() {
@@ -115,6 +121,9 @@ func (s *Server) handleMemoryDelete(w http.ResponseWriter, r *http.Request) {
 	path := r.FormValue("path")
 	if path == "" {
 		http.Error(w, "missing path", http.StatusBadRequest)
+		return
+	}
+	if fileMissing(w, path) {
 		return
 	}
 	if sc := s.memoryScope(path); !sc.deletable() {
@@ -263,6 +272,16 @@ func (s *Server) handleTrashEmpty(w http.ResponseWriter, r *http.Request) {
 }
 
 // helpers
+
+// fileMissing answers 404 when nothing is at path; the scope check would
+// otherwise report a missing CLAUDE.md as one ccmanager refuses to touch.
+func fileMissing(w http.ResponseWriter, path string) bool {
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		http.Error(w, "no file at "+path, http.StatusNotFound)
+		return true
+	}
+	return false
+}
 
 func parseToken(token string) (safeio.FileState, bool) {
 	parts := strings.SplitN(token, ":", 2)

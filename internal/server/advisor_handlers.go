@@ -109,6 +109,9 @@ func (s *Server) handleAdvisorApply(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing fields", http.StatusBadRequest)
 		return
 	}
+	if fileMissing(w, file) {
+		return
+	}
 	if sc := s.memoryScope(file); !sc.editable() {
 		http.Error(w, sc.editRefusal(), http.StatusForbidden)
 		return

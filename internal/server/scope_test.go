@@ -130,6 +130,48 @@ func TestMemoryRoutesRefuseFilesOutsideScope(t *testing.T) {
 	}
 }
 
+func TestMissingMemoryFileIsNotFound(t *testing.T) {
+	h, cfg := newTestServer(t)
+	gone := filepath.Join(cfg.ConfigRoot, "work", "sub", "CLAUDE.md")
+	cases := []struct {
+		method, target string
+		form           url.Values
+	}{
+		{"GET", "/memory/edit?path=" + url.QueryEscape(gone), nil},
+		{"POST", "/memory/save", url.Values{"path": {gone}, "content": {"x"}, "token": {"1:1"}}},
+		{"POST", "/memory/delete", url.Values{"path": {gone}}},
+		{"POST", "/advisor/apply", url.Values{"file": {gone}, "original": {"a"}, "suggestion": {"b"}}},
+	}
+	for _, c := range cases {
+		if rec := do(t, h, c.method, c.target, c.form, false); rec.Code != http.StatusNotFound {
+			t.Errorf("%s %s = %d, want 404", c.method, c.target, rec.Code)
+		}
+	}
+	if _, err := os.Stat(gone); !os.IsNotExist(err) {
+		t.Errorf("a refused save created %s: %v", gone, err)
+	}
+}
+
+func TestResolveOffersEditOnlyForEditableSources(t *testing.T) {
+	h, cfg := newTestServer(t)
+	dir := t.TempDir()
+	defer func(prev string) { managedPolicyDir = prev }(managedPolicyDir)
+	managedPolicyDir = dir
+	policy := filepath.Join(dir, "CLAUDE.md")
+	writeTestFile(t, policy, "# Managed policy\n")
+
+	work := filepath.Join(cfg.ConfigRoot, "work")
+	body := do(t, h, "GET", "/memory/resolve?dir="+url.QueryEscape(work), nil, false).Body.String()
+	// html/template percent-encodes the query value with lowercase hex.
+	editHref := func(p string) string {
+		return `href="/memory/edit?path=` + strings.ReplaceAll(url.QueryEscape(p), "%2F", "%2f")
+	}
+	assertContains(t, "resolve", body, tildePath(policy), editHref(filepath.Join(work, "CLAUDE.md")))
+	if strings.Contains(body, editHref(policy)) {
+		t.Error("resolve view offers to edit the managed policy")
+	}
+}
+
 func TestManagedPolicyIsViewOnly(t *testing.T) {
 	h, _ := newTestServer(t)
 	dir := t.TempDir()
