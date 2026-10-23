@@ -1,3 +1,4 @@
 /ccmanager
 *.tmp-*
 .playwright-mcp/
+CLAUDE.local.md
