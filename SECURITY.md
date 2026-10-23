@@ -44,6 +44,8 @@ In scope:
 - Write or delete paths that bypass the atomic write, the backup-before-overwrite,
   or the trash.
 - The advisor gaining tool or filesystem access when it runs `claude`.
+- Files ccmanager writes, moves or indexes becoming readable by other local
+  users.
 - Cross-site scripting through rendered transcripts, memory files, or advisor
   output.
 

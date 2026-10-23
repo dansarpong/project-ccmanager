@@ -26,7 +26,7 @@ assembled for a given working directory. ccmanager fills those gaps:
   the ones you no longer need (recoverably).
 - **Memory** — see the exact, ordered stack of memory files Claude Code loads for
   a directory, with both a "what Claude sees" rendering and the raw files;
-  inventory every memory file on the machine; edit the ones you own; and get
+  inventory every memory file across your projects; edit the ones you own; and get
   lint + LLM suggestions for improving them.
 - **Safety by construction** — deletes go to a 30-day trash, edits are atomic and
   backed up, auto memory is read-only, and the LLM advisor only ever *proposes*.
@@ -66,9 +66,9 @@ or set `GOSUMDB=off`.
 | Listen port (always bound to `127.0.0.1`) | `-port` flag | `8765` |
 | `claude` CLI for the advisor | found on `PATH` | optional; advisor degrades gracefully if absent |
 
-ccmanager keeps its own state (the SQLite index and the trash) under
-`<config-dir>/ccmanager/`, so it never writes into Claude Code's own data
-except when you explicitly edit or delete a file.
+ccmanager keeps its own state (the SQLite index, the trash and the advisor's
+empty working directory) under `<config-dir>/ccmanager/`, so it never writes
+into Claude Code's own data except when you explicitly edit or delete a file.
 
 ---
 
@@ -85,13 +85,23 @@ This tool can change and delete your files, so it is conservative by design:
   trigger a delete or an edit.
 - **Trash with 30-day restore.** Deleting a session or a memory file moves it
   into `<config-dir>/ccmanager/trash/` with a manifest entry; it is restorable
-  for 30 days, then purged. Purge runs opportunistically on launch, and there is
-  an "Empty now" action.
+  for 30 days, then purged. A session's sidecar folder (`<id>/`, holding subagent
+  transcripts and large tool results) moves with its transcript and comes back
+  with it. Moves are renames, so permissions are kept. Purge runs
+  opportunistically on launch, and there is an "Empty now" action.
+- **Private by default.** `<config-dir>/ccmanager/` and its trash are `0700` and
+  the index is `0600`: the index holds the text of every transcript, so it gets
+  the owner-only access Claude Code gives the transcripts themselves.
 - **Atomic writes.** Every write goes to a temp file in the same directory,
   is `fsync`'d, and renamed into place, so a reader never sees a half-written
-  file.
+  file. Writing a symlinked file (say `CLAUDE.md` → `AGENTS.md`) writes the
+  target and leaves the link in place.
 - **Backup before overwrite.** Saving an edited memory file first copies the
-  current on-disk version into the trash.
+  current on-disk version into the trash. "Roll back" on that backup swaps it
+  in, after backing up the version it replaces, so a roll back can be undone too.
+- **Scoped edits.** Only `CLAUDE.md`, `CLAUDE.local.md` and rules files
+  (`~/.claude/rules/` and any `.claude/rules/`) can be edited; those and auto
+  memory can be deleted. Managed policy is view-only. Any other path gets a 403.
 - **Change detection.** When you open a file to edit, ccmanager records its
   mtime+size. If the file changed on disk before you save (e.g. Claude Code
   edited it), you get a conflict warning and must confirm before overwriting.
@@ -117,7 +127,9 @@ It mirrors Claude Code's documented resolution
 
 1. **Collect sources in load order**, broadest scope first so the most specific
    instruction is read last:
-   - Managed policy (`/etc/claude-code/CLAUDE.md` on Linux), if present.
+   - Managed policy, if present: `CLAUDE.md` in `/etc/claude-code` (Linux and
+     WSL), `/Library/Application Support/ClaudeCode` (macOS) or
+     `C:\Program Files\ClaudeCode` (Windows).
    - User: `~/.claude/CLAUDE.md`, then user rules `~/.claude/rules/**/*.md`.
    - Walk the filesystem from the root down to the working directory; at each
      directory collect `CLAUDE.md`, then `CLAUDE.local.md`, then
@@ -134,18 +146,26 @@ It mirrors Claude Code's documented resolution
    (approval-gated)*.
 3. **Mark conditional rules.** A rule with `paths:` frontmatter only applies to
    matching files, so it is flagged conditional rather than always-on.
-   `claudeMdExcludes` glob patterns from settings flag excluded files.
+   `claudeMdExcludes` glob patterns flag excluded files. They merge across
+   managed settings (`managed-settings.json` beside the managed `CLAUDE.md`),
+   user settings, the working directory's `.claude/settings.json`, and
+   `.claude/settings.local.json` at the repository root (plus a legacy copy in the
+   working directory). The managed `CLAUDE.md` can't be excluded.
 4. **Append auto memory.** Only the first **200 lines or 25 KB** (whichever comes
    first) of `MEMORY.md` loads at session start; topic files are listed as
-   on-demand. The auto-memory directory is located from the project's git root.
+   on-demand. The auto-memory directory is keyed by the git repository, so a
+   worktree shares its main checkout's. `autoMemoryDirectory` overrides it from
+   any settings layer (managed, then local, project, user). Folder names under
+   `projects/` replace every non-alphanumeric character with `-`.
 5. **Produce two renderings.** "What Claude sees" inlines imports and strips
    block-level HTML comments (but preserves comments inside code fences, matching
    Claude Code); "Raw" is the file exactly as on disk.
 
 Two UI surfaces use the engine: the per-project **resolved view** (pick a
 directory, see the ordered stack with provenance, both renderings, and the import
-graph) and the **global inventory** (every memory file on the machine, for
-cleanup across projects).
+graph) and the **global inventory** (managed policy, your user memory, every
+memory file the engine would load in each project your sessions ran in, and
+their auto memory, for cleanup across projects).
 
 ---
 
@@ -198,8 +218,17 @@ CLI in print mode, granting it **no tools**, so it can only analyze the text
 passed on stdin and cannot touch your filesystem:
 
 ```
-claude -p --output-format json --tools "" --allowed-tools ""
+claude -p --output-format json --tools "" --allowed-tools "" \
+  --disallowed-tools "mcp__*" --no-session-persistence --disable-slash-commands \
+  --settings '{"disableAllHooks":true}' --strict-mcp-config
 ```
+
+Built-in and MCP tools are off, no MCP servers start, hooks don't run, and the
+run isn't saved as a session. It runs in an empty directory under
+`<config-dir>/ccmanager/advisor/`, so the folder you launched ccmanager from
+doesn't lend it its hooks, `.mcp.json` or `CLAUDE.md`. `--strict-mcp-config` is
+left out when a managed `managed-mcp.json` is deployed, because Claude Code
+refuses to start with both.
 
 It offers two analyses: rewrites of weak instructions, and semantic contradiction
 detection across the resolved stack. Each result is shown as a **diff you
@@ -211,8 +240,9 @@ banner and the static lint keeps working regardless.
 
 > Note: `--bare` is deliberately **not** passed. In Claude Code 2.1.187 that flag
 > suppresses subscription credential loading, so a logged-in user would still get
-> "Not logged in". The no-tools sandbox is provided entirely by the `--tools`
-> flags, not by `--bare`.
+> "Not logged in". `--setting-sources` is left out for the same reason: it would
+> drop `apiKeyHelper` and `env` from your user settings. The sandbox comes from
+> the flags above, not from `--bare`.
 
 ---
 
@@ -232,6 +262,9 @@ assumptions in a few places. These were verified against **Claude Code 2.1.186/1
   The parser handles all of these and tolerates unknown/missing fields and a
   truncated final line. (`sessions/parse.go`)
 - **No `sessions-index.json` exists**; the JSONL files are the source of truth.
+- **A transcript has a sidecar folder** `projects/<project>/<id>/` (subagent
+  transcripts, `tool-results/`, `mcp-tasks/`), so deleting a session moves both.
+  (`trash/trash.go`)
 - **The headless `claude` envelope** is `{type:"result", is_error, result, ...}`;
   the advisor reads `.result` and treats `is_error` (e.g. "Not logged in") as
   unavailable. (`advisor/claude.go`)

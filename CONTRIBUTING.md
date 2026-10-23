@@ -54,17 +54,22 @@ point of the tool. A change that weakens any of these will not be merged:
   on-disk version into the trash.
 - **Deletes are recoverable** — deletes move files to
   `<config-dir>/ccmanager/trash/` with a manifest entry and a 30-day restore
-  window.
+  window. A session's sidecar folder moves with its transcript.
 - **Change detection** — a save warns on conflict if the file changed on disk
   since it was opened.
-- **Auto memory is read-only** — view and delete only; edit routes return 403.
+- **Edits stay in scope** — only `CLAUDE.md`, `CLAUDE.local.md` and rules files
+  are editable (`internal/server/scope.go`). Auto memory is view-and-delete,
+  managed policy is view-only, and any other path gets a 403.
+- **App data stays private** — `<config-dir>/ccmanager/` is `0700` and the index
+  `0600`. Moving, copying or restoring a file must never loosen its mode.
 - **Localhost only** — the server binds `127.0.0.1` and nothing else.
 - **Browser requests are checked** — `Server.Routes` rejects any Host other
   than `127.0.0.1` or `localhost`, and cross-origin requests that aren't GET,
   HEAD, or OPTIONS. **GET handlers must never change state**, because the
   cross-origin check doesn't cover them.
-- **The advisor never writes on its own** — it runs `claude` with no tools and
-  only proposes diffs the user approves.
+- **The advisor never writes on its own** — it runs `claude` with no tools, no
+  MCP servers, no hooks and no saved session, from an empty working directory,
+  and only proposes diffs the user approves.
 
 ## Tests
 
