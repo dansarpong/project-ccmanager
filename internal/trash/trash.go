@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -28,6 +29,10 @@ const RetentionDays = 30
 // original path.
 var ErrExists = errors.New("already exists")
 
+// ErrBrokenLink means a roll back was refused because the original path is a
+// symlink to a missing file, which writing would replace with a regular file.
+var ErrBrokenLink = errors.New("broken symlink")
+
 // Kinds of trash entries.
 const (
 	KindSession      = "session"       // a deleted transcript
@@ -38,6 +43,7 @@ const (
 // Trash manages move-to-trash, backup, restore, and purge against a store and a
 // trash directory on disk.
 type Trash struct {
+	mu       sync.Mutex // one change at a time, so a repeated restore finds its entry gone
 	store    *store.Store
 	trashDir string
 }
@@ -52,6 +58,8 @@ func New(st *store.Store, trashDir string) *Trash {
 // than read from the clock) so callers and tests control the timestamps. It
 // returns the new entry's id.
 func (t *Trash) MoveToTrash(kind, path, sessionID, note string, now time.Time) (int64, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	return t.stash(kind, path, sessionID, note, now, true)
 }
 
@@ -59,6 +67,12 @@ func (t *Trash) MoveToTrash(kind, path, sessionID, note string, now time.Time) (
 // overwritten, so the prior content is restorable. It is a no-op (returns 0)
 // if the file does not yet exist.
 func (t *Trash) BackupBeforeWrite(path string, now time.Time) (int64, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.backup(path, now)
+}
+
+func (t *Trash) backup(path string, now time.Time) (int64, error) {
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
 			return 0, nil
@@ -154,11 +168,16 @@ func sidecar(transcript string) (string, bool) {
 // one replaces the current file, which is first backed up as a new entry
 // dated now.
 func (t *Trash) Restore(id int64, now time.Time) (store.TrashEntry, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	e, err := t.store.GetTrash(id)
 	if err != nil {
 		return store.TrashEntry{}, fmt.Errorf("looking up trash entry %d: %w", id, err)
 	}
 	if e.Kind == KindMemoryBackup && exists(e.OriginalPath) {
+		if _, err := os.Stat(e.OriginalPath); errors.Is(err, fs.ErrNotExist) {
+			return e, fmt.Errorf("cannot roll back: %s is a symlink to a missing file: %w", e.OriginalPath, ErrBrokenLink)
+		}
 		return e, t.rollBack(e, now)
 	}
 	steps := []step{{from: e.TrashPath, to: e.OriginalPath}}
@@ -203,7 +222,7 @@ func (t *Trash) rollBack(e store.TrashEntry, now time.Time) error {
 	} else if info, err := os.Stat(e.TrashPath); err == nil {
 		mode = info.Mode().Perm()
 	}
-	if _, err := t.BackupBeforeWrite(e.OriginalPath, now); err != nil {
+	if _, err := t.backup(e.OriginalPath, now); err != nil {
 		return fmt.Errorf("backing up the current version: %w", err)
 	}
 	if err := safeio.AtomicWrite(e.OriginalPath, data, mode); err != nil {
@@ -226,6 +245,8 @@ func exists(path string) bool {
 // supplied so the launch path and tests can control the cutoff. It returns the
 // number of entries purged.
 func (t *Trash) PurgeExpired(now time.Time) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	expired, err := t.store.ExpiredTrash(now.UTC().Format(time.RFC3339))
 	if err != nil {
 		return 0, err
@@ -235,6 +256,8 @@ func (t *Trash) PurgeExpired(now time.Time) (int, error) {
 
 // EmptyNow purges every trash entry immediately.
 func (t *Trash) EmptyNow() (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	all, err := t.store.ListTrash()
 	if err != nil {
 		return 0, err
@@ -269,11 +292,26 @@ func (t *Trash) purge(entries []store.TrashEntry) (int, error) {
 // direct child of the trash dir is refused.
 func (t *Trash) entryDir(trashPath string) (string, error) {
 	dir := filepath.Dir(filepath.Clean(trashPath))
-	rel, err := filepath.Rel(filepath.Clean(t.trashDir), dir)
-	if err != nil || rel == "." || rel == ".." || strings.ContainsRune(rel, filepath.Separator) {
+	name := filepath.Base(dir)
+	if name == "." || name == ".." || name == string(filepath.Separator) || !sameDir(filepath.Dir(dir), t.trashDir) {
 		return "", fmt.Errorf("%s is not in its own entry of the trash dir %s", trashPath, t.trashDir)
 	}
-	return dir, nil
+	// Rebuilt from the trash dir, so the entry itself is never resolved through a link.
+	return filepath.Join(t.trashDir, name), nil
+}
+
+// sameDir reports whether a and b name the same directory, even when one was
+// reached through a symlink (say, a symlinked config dir).
+func sameDir(a, b string) bool {
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true
+	}
+	ai, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	bi, err := os.Stat(b)
+	return err == nil && os.SameFile(ai, bi)
 }
 
 // step is one move of a file or directory.
