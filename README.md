@@ -106,6 +106,9 @@ This tool can change and delete your files, so it is conservative by design:
   and a path with no file a 404. A symlinked memory file is edited only when its
   target is in scope too (another memory file, or a `.md` beside the link, as
   with `CLAUDE.md` → `AGENTS.md`); deleting one moves the link, not its target.
+  The same goes for a file reached through a symlinked folder: it must really
+  be a memory file, though your own `~/.claude/rules` may live in dotfiles.
+  Restoring re-checks where the original path now leads.
 - **Change detection.** When you open a file to edit, ccmanager records its
   mtime+size. If the file changed on disk before you save (e.g. Claude Code
   edited it), you get a conflict warning and must confirm before overwriting.
