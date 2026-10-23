@@ -6,11 +6,14 @@
 package trash
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/dansarpong/ccmanager/internal/safeio"
@@ -59,10 +62,11 @@ func (t *Trash) BackupBeforeWrite(path string, now time.Time) (int64, error) {
 	return t.stash(KindMemoryBackup, path, "", "backup before overwrite", now, false)
 }
 
-// stash places a copy (or moves) the file into trash and records it. When move
-// is true the original is removed after copying.
+// stash moves the file into a new trash entry (or, when move is false, copies
+// it there) and records it. A move whose manifest row can't be written is put
+// back, so a file is never left in the trash with no way to restore it.
 func (t *Trash) stash(kind, path, sessionID, note string, now time.Time, move bool) (int64, error) {
-	if err := os.MkdirAll(t.trashDir, 0o755); err != nil {
+	if err := os.MkdirAll(t.trashDir, 0o700); err != nil {
 		return 0, fmt.Errorf("creating trash dir: %w", err)
 	}
 
@@ -71,13 +75,18 @@ func (t *Trash) stash(kind, path, sessionID, note string, now time.Time, move bo
 		return 0, err
 	}
 	dst := filepath.Join(sub, filepath.Base(path))
-	if err := copyFile(path, dst); err != nil {
-		return 0, err
-	}
+	steps := []step{{from: path, to: dst}}
 	if move {
-		if err := os.Remove(path); err != nil {
-			return 0, fmt.Errorf("removing original after trashing: %w", err)
+		err = moveAll(steps)
+	} else if err = copyFile(path, dst); err == nil {
+		err = syncDir(sub)
+	}
+	if err != nil {
+		if !move {
+			_ = os.Remove(dst)
 		}
+		_ = os.Remove(sub)
+		return 0, err
 	}
 
 	entry := store.TrashEntry{
@@ -91,6 +100,12 @@ func (t *Trash) stash(kind, path, sessionID, note string, now time.Time, move bo
 	}
 	id, err := t.store.InsertTrash(entry)
 	if err != nil {
+		if !move {
+			_ = os.Remove(dst)
+		} else if uerr := undo(steps); uerr != nil {
+			return 0, fmt.Errorf("%w; moving it back failed too, it is in %s: %v", err, sub, uerr)
+		}
+		_ = os.Remove(sub)
 		return 0, err
 	}
 	return id, nil
@@ -102,7 +117,7 @@ func (t *Trash) stash(kind, path, sessionID, note string, now time.Time, move bo
 func (t *Trash) newEntryDir(now time.Time) (string, error) {
 	for ns := now.UnixNano(); ; ns++ {
 		dir := filepath.Join(t.trashDir, strconv.FormatInt(ns, 10))
-		err := os.Mkdir(dir, 0o755)
+		err := os.Mkdir(dir, 0o700)
 		if err == nil {
 			return dir, nil
 		}
@@ -127,14 +142,20 @@ func (t *Trash) Restore(id int64, now time.Time) (store.TrashEntry, error) {
 	if exists(e.OriginalPath) {
 		return e, fmt.Errorf("cannot restore: a file already exists at %s", e.OriginalPath)
 	}
-	if err := os.MkdirAll(filepath.Dir(e.OriginalPath), 0o755); err != nil {
+	dirMode := os.FileMode(0o755)
+	if e.Kind == KindSession {
+		// Claude Code keeps transcripts owner-only; copies trashed by older
+		// versions lost that mode.
+		if err := os.Chmod(e.TrashPath, 0o600); err != nil {
+			return e, fmt.Errorf("restricting restored transcript: %w", err)
+		}
+		dirMode = 0o700
+	}
+	if err := os.MkdirAll(filepath.Dir(e.OriginalPath), dirMode); err != nil {
 		return e, fmt.Errorf("recreating original directory: %w", err)
 	}
-	if err := copyFile(e.TrashPath, e.OriginalPath); err != nil {
+	if err := moveAll([]step{{from: e.TrashPath, to: e.OriginalPath}}); err != nil {
 		return e, err
-	}
-	if err := os.Remove(e.TrashPath); err != nil {
-		return e, fmt.Errorf("removing trashed copy after restore: %w", err)
 	}
 	_ = os.Remove(filepath.Dir(e.TrashPath)) // best-effort cleanup of the entry dir
 	if err := t.store.DeleteTrash(id); err != nil {
@@ -211,22 +232,158 @@ func (t *Trash) purge(entries []store.TrashEntry) (int, error) {
 	return n, nil
 }
 
+// step is one move of a file or directory.
+type step struct{ from, to string }
+
+// moveAll performs steps in order. If one fails, the steps already done are
+// undone, so either everything moves or nothing does.
+func moveAll(steps []step) error {
+	for i, s := range steps {
+		if err := move(s.from, s.to); err != nil {
+			if uerr := undo(steps[:i]); uerr != nil {
+				return fmt.Errorf("%w; undoing the earlier moves failed too: %v", err, uerr)
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+// undo moves steps back, last first.
+func undo(steps []step) error {
+	var errs []error
+	for i := len(steps) - 1; i >= 0; i-- {
+		if err := move(steps[i].to, steps[i].from); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// rename is os.Rename, swappable so tests can force the cross-device fallback.
+var rename = os.Rename
+
+// move renames src to dst, which keeps the mode and is atomic. Across
+// filesystems, where rename can't work, it copies src, syncs the copy to disk,
+// then removes src.
+func move(src, dst string) error {
+	err := rename(src, dst)
+	if err == nil || !errors.Is(err, syscall.EXDEV) {
+		return err
+	}
+	info, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	if err := copyAll(src, dst, info); err != nil {
+		return err
+	}
+	if err := syncDir(filepath.Dir(dst)); err != nil {
+		_ = os.RemoveAll(dst)
+		return err
+	}
+	if err := os.RemoveAll(src); err != nil {
+		// A failed directory removal may have taken part of src: keep the
+		// complete copy. A single file is removed all or nothing.
+		if !info.IsDir() {
+			_ = os.Remove(dst)
+		}
+		return fmt.Errorf("removing %s after copying it to %s: %w", src, dst, err)
+	}
+	return nil
+}
+
+// copyAll copies the file, directory tree or symlink at src to dst, which must
+// not exist, keeping permissions and syncing what it writes. On failure it
+// removes what it created.
+func copyAll(src, dst string, info fs.FileInfo) error {
+	switch {
+	case info.Mode().IsRegular():
+		return copyFile(src, dst)
+	case info.Mode()&fs.ModeSymlink != 0:
+		target, err := os.Readlink(src)
+		if err != nil {
+			return err
+		}
+		return os.Symlink(target, dst)
+	case info.IsDir():
+		if err := os.Mkdir(dst, 0o700); err != nil {
+			return err
+		}
+		if err := copyDirContents(src, dst, info.Mode().Perm()); err != nil {
+			_ = os.RemoveAll(dst)
+			return err
+		}
+		return nil
+	default:
+		return fmt.Errorf("cannot move %s: not a file, directory or symlink", src)
+	}
+}
+
+func copyDirContents(src, dst string, perm fs.FileMode) error {
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil {
+			return err
+		}
+		if err := copyAll(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name()), info); err != nil {
+			return err
+		}
+	}
+	// Set last: a read-only directory would refuse the entries copied into it.
+	if err := os.Chmod(dst, perm); err != nil {
+		return err
+	}
+	return syncDir(dst)
+}
+
+// copyFile copies src (following a symlink) to a new file dst with the same
+// permissions, synced to disk. It never overwrites an existing dst.
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return fmt.Errorf("opening %s: %w", src, err)
 	}
 	defer in.Close()
-	out, err := os.Create(dst)
+	info, err := in.Stat()
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", src, err)
+	}
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return fmt.Errorf("creating %s: %w", dst, err)
 	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
+	_, err = io.Copy(out, in)
+	if err == nil {
+		err = out.Chmod(info.Mode().Perm())
+	}
+	if err == nil {
+		err = out.Sync()
+	}
+	if cerr := out.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		_ = os.Remove(dst)
 		return fmt.Errorf("copying %s -> %s: %w", src, dst, err)
 	}
-	if err := out.Close(); err != nil {
-		return fmt.Errorf("closing %s: %w", dst, err)
+	return nil
+}
+
+// syncDir flushes a directory's entries to disk, so a file just created in it
+// survives a crash.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	if err := d.Sync(); err != nil {
+		return fmt.Errorf("syncing %s: %w", dir, err)
 	}
 	return nil
 }
