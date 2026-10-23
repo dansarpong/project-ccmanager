@@ -62,7 +62,7 @@ func managedDir(goos string) string {
 
 // Routes returns the HTTP handler with all routes registered, using Go 1.22+
 // method-based routing, behind the loopback Host check and cross-origin
-// protection for state-changing requests.
+// protection for state-changing requests. Handler errors render as pages.
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 
@@ -95,7 +95,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /advisor/analyze", s.handleAdvisorAnalyze)
 	mux.HandleFunc("POST /advisor/apply", s.handleAdvisorApply)
 
-	return localOnly(http.NewCrossOriginProtection().Handler(mux))
+	// friendlyErrors sits inside both guards so their rejections, meant for
+	// attackers rather than users, stay plain text.
+	return localOnly(http.NewCrossOriginProtection().Handler(s.friendlyErrors(mux)))
 }
 
 // localOnly rejects requests not addressed to a loopback host name. Binding

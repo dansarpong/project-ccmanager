@@ -109,7 +109,7 @@ func TestPagesRender(t *testing.T) {
 	h, cfg := newTestServer(t)
 	work := filepath.Join(cfg.ConfigRoot, "work")
 	shell := []string{
-		`<meta name="htmx-config" content='{"includeIndicatorStyles":false}'>`,
+		`<meta name="htmx-config" content='{"includeIndicatorStyles":false,"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"[45]..","swap":true,"error":true}]}'>`,
 		`<script src="/static/app.js" defer></script>`,
 		`<div class="app">`, `<nav class="sidebar"`, `<main class="main">`,
 		`<dialog class="palette" id="palette"`, `id="count-sessions">1</span>`,

@@ -1,0 +1,15 @@
+{{define "error.html"}}{{template "head" .}}
+  <div class="page-body">
+    <div class="empty-state">
+      <svg class="icon icon--lg" aria-hidden="true"><use href="/static/icons.svg#{{.Back.Icon}}"/></svg>
+      <h1 class="empty-state__title">{{.StatusText}}</h1>
+      <p class="empty-state__text">{{.Message}}</p>
+      <a class="btn btn--secondary" href="{{.Back.Href}}">Back to {{.Back.Label}}</a>
+    </div>
+  </div>
+{{template "foot" .}}{{end}}
+
+{{define "error-flash"}}<dialog class="flash__message" open>
+  <p class="flash__text"><strong>{{.StatusText}}</strong> {{.Message}}</p>
+  <form method="dialog"><button class="btn btn--ghost" type="submit">Dismiss</button></form>
+</dialog>{{end}}
