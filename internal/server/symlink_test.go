@@ -48,7 +48,7 @@ func TestMemoryRoutesRefuseSymlinksOutOfScope(t *testing.T) {
 	if rec.Code != http.StatusForbidden || strings.Contains(rec.Body.String(), "SECRET_SAUCE") {
 		t.Errorf("edit = %d %q, want 403 without the target's contents", rec.Code, rec.Body.String())
 	}
-	assertContains(t, "edit refusal", rec.Body.String(), "symlink to "+bashrc)
+	assertContains(t, "edit refusal", rec.Body.String(), "resolves to "+bashrc)
 
 	rec = do(t, h, "POST", "/memory/save", url.Values{"path": {link}, "content": {"pwned"}, "token": {token}}, false)
 	if rec.Code != http.StatusForbidden {
@@ -139,7 +139,7 @@ func TestRollBackRefusesOriginalNowLinkedOutOfScope(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("roll back = %d, want 403: %s", rec.Code, rec.Body.String())
 	}
-	assertContains(t, "roll back refusal", rec.Body.String(), "symlink to "+bashrc)
+	assertContains(t, "roll back refusal", rec.Body.String(), "resolves to "+bashrc)
 	if got := readBody(t, bashrc); got != "export SECRET_SAUCE=1\n" {
 		t.Errorf("refused roll back changed the target to %q", got)
 	}

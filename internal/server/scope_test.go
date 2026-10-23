@@ -29,6 +29,7 @@ func TestClassify(t *testing.T) {
 		configRoot:       filepath.Join(root, "config"),
 		projectsDir:      filepath.Join(root, "config", "projects"),
 		managedPolicyDir: filepath.Join(root, "managed"),
+		dataDir:          filepath.Join(root, "config", "ccmanager"),
 	}
 	work := filepath.Join(root, "work")
 	mem := filepath.Join(roots.projectsDir, "-work", "memory")
@@ -56,8 +57,10 @@ func TestClassify(t *testing.T) {
 		{filepath.Join(work, "sub", "CLAUDE.md"), scopeEditable},
 		{filepath.Join(work, ".claude", "CLAUDE.md"), scopeEditable},
 		{filepath.Join(work, ".claude", "rules", "sub", "x.md"), scopeEditable},
-		{work + "/sub/../CLAUDE.local.md", scopeEditable},
+		{work + "/sub/../CLAUDE.local.md", scopeOutside},
 		{work + "/../work/notes.txt", scopeOutside},
+		{filepath.Join("missing", "CLAUDE.md"), scopeOutside},
+		{filepath.Join(roots.dataDir, "trash", "1", "CLAUDE.md"), scopeOutside},
 		{filepath.Join(work, "dir", "CLAUDE.md"), scopeOutside},
 	}
 	// A directory named like a memory file is never in scope.
@@ -115,6 +118,11 @@ func TestClassifySymlinkedParentDirs(t *testing.T) {
 	symlink(t, mem, filepath.Join(root, "a", ".claude", "rules"))
 	symlink(t, roots.managedPolicyDir, filepath.Join(root, "b", ".claude", "rules"))
 	symlink(t, dotfiles, filepath.Join(root, "c", ".claude", "rules"))
+	// The user's own rules dir may live in dotfiles; a repo's may not lead there.
+	writeTestFile(t, filepath.Join(root, "dotfiles", "user-rules", "u.md"), "# user\n")
+	symlink(t, filepath.Join(root, "dotfiles", "user-rules"), filepath.Join(roots.configRoot, "rules"))
+	writeTestFile(t, filepath.Join(root, "realproj", "CLAUDE.md"), "# project\n")
+	symlink(t, filepath.Join(root, "realproj"), filepath.Join(root, "d"))
 
 	cases := []struct {
 		path string
@@ -122,7 +130,9 @@ func TestClassifySymlinkedParentDirs(t *testing.T) {
 	}{
 		{filepath.Join(root, "a", ".claude", "rules", "MEMORY.md"), scopeAutoMemory},
 		{filepath.Join(root, "b", ".claude", "rules", "policy.md"), scopeManaged},
-		{filepath.Join(root, "c", ".claude", "rules", "style.md"), scopeEditable},
+		{filepath.Join(root, "c", ".claude", "rules", "style.md"), scopeLinkOut},
+		{filepath.Join(roots.configRoot, "rules", "u.md"), scopeEditable},
+		{filepath.Join(root, "d", "CLAUDE.md"), scopeEditable},
 	}
 	for _, c := range cases {
 		if got := classify(c.path, roots).scope; got != c.want {
@@ -183,7 +193,7 @@ func TestClassifySymlinks(t *testing.T) {
 			if !got.deletable() {
 				t.Errorf("%s: the link itself should be deletable", c.name)
 			}
-			assertContains(t, c.name+" refusal", got.editRefusal(), "symlink to "+c.target, "outside what ccmanager edits")
+			assertContains(t, c.name+" refusal", got.editRefusal(), "resolves to "+c.target, "outside what ccmanager edits")
 		}
 	}
 

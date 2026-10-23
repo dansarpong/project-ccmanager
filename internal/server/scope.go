@@ -1,6 +1,8 @@
 package server
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -49,7 +51,7 @@ type scopedFile struct {
 
 func (f scopedFile) editRefusal() string {
 	if f.scope == scopeLinkOut {
-		return "this file is a symlink to " + f.target + ", outside what ccmanager edits"
+		return "this file resolves to " + f.target + ", outside what ccmanager edits"
 	}
 	return f.scope.editRefusal()
 }
@@ -60,11 +62,64 @@ type scopeRoots struct {
 	configRoot       string
 	projectsDir      string
 	managedPolicyDir string
+	dataDir          string // ccmanager's own state, trash included: never in scope
+	userRules        string // the user rules dir; "" means <configRoot>/rules
 	goos             string
 }
 
+func (s *Server) scopeRoots() scopeRoots {
+	return scopeRoots{configRoot: s.cfg.ConfigRoot, projectsDir: s.cfg.ProjectsDir, managedPolicyDir: managedPolicyDir, dataDir: s.cfg.DataDir, goos: runtime.GOOS}
+}
+
 func (s *Server) memoryScope(path string) scopedFile {
-	return classify(path, scopeRoots{configRoot: s.cfg.ConfigRoot, projectsDir: s.cfg.ProjectsDir, managedPolicyDir: managedPolicyDir, goos: runtime.GOOS})
+	return classify(path, s.scopeRoots())
+}
+
+// restorable reports whether a memory file trashed from path, which no longer
+// exists, may be put back there: path must still be in scope where its nearest
+// existing parent really leads, so a directory since swapped for a symlink
+// can't redirect the restore.
+func (s *Server) restorable(path string) bool {
+	if !canonical(path) {
+		return false
+	}
+	r := s.scopeRoots()
+	sc := r.pathScope(path)
+	if sc != scopeEditable && sc != scopeAutoMemory {
+		return false
+	}
+	real, err := resolveMissing(path)
+	if err != nil {
+		return false
+	}
+	if real != path {
+		sc = r.realScope(real, sc)
+	}
+	return sc == scopeEditable || sc == scopeAutoMemory
+}
+
+// canonical reports whether path is absolute and already clean. Cleaning ".."
+// as text can disagree with the OS, which resolves it after following links.
+func canonical(path string) bool {
+	return filepath.IsAbs(path) && filepath.Clean(path) == path
+}
+
+// resolveMissing resolves symlinks in the nearest existing ancestor of path
+// and joins the rest, for a path that doesn't exist yet.
+func resolveMissing(path string) (string, error) {
+	dir, rest := path, ""
+	for {
+		real, err := filepath.EvalSymlinks(dir)
+		if err == nil {
+			return filepath.Join(real, rest), nil
+		}
+		parent := filepath.Dir(dir)
+		if !errors.Is(err, fs.ErrNotExist) || parent == dir {
+			return "", err
+		}
+		rest = filepath.Join(filepath.Base(dir), rest)
+		dir = parent
+	}
 }
 
 // classify returns path's scope and target. Only a regular file, or a symlink
@@ -73,20 +128,24 @@ func (s *Server) memoryScope(path string) scopedFile {
 // in scope on its own or is a .md file beside it (CLAUDE.md -> AGENTS.md);
 // otherwise just the link can be deleted.
 func classify(path string, roots scopeRoots) scopedFile {
-	p, err := filepath.Abs(path)
-	if err != nil {
+	if !canonical(path) {
 		return scopedFile{}
 	}
+	p := path
 	info, err := os.Lstat(p)
 	if err != nil {
 		return scopedFile{}
 	}
 	sc := roots.pathScope(p)
 	if info.Mode().IsRegular() {
-		if real, err := filepath.EvalSymlinks(p); err == nil && real != p {
+		real, err := filepath.EvalSymlinks(p)
+		if err != nil {
+			return scopedFile{}
+		}
+		if real != p {
 			sc = roots.realScope(real, sc)
 		}
-		return scopedFile{scope: sc, target: p}
+		return scopedFile{scope: sc, target: real}
 	}
 	if sc == scopeOutside || info.Mode()&os.ModeSymlink == 0 {
 		return scopedFile{}
@@ -124,14 +183,23 @@ func (r scopeRoots) linkTargetEditable(link, target string) bool {
 	return err == nil && dir == filepath.Dir(target) && strings.EqualFold(filepath.Ext(target), ".md")
 }
 
-// realScope narrows sc for a regular file reached through a symlinked
-// directory: a file that really lives in managed policy or auto memory takes
-// that scope, so a symlinked .claude/rules can't open either to edits.
+// realScope is sc for a file whose real location, real, differs because a
+// parent directory is a symlink. Managed policy and auto memory keep their
+// scope wherever they're reached from, and an editable file stays editable
+// only if it really is a memory file too; otherwise the write would land out
+// of scope, so it can only be deleted.
 func (r scopeRoots) realScope(real string, sc scope) scope {
+	editable := false
 	for _, rr := range []scopeRoots{r, r.resolved()} {
-		if s := rr.pathScope(real); s == scopeManaged || s == scopeAutoMemory {
+		switch s := rr.pathScope(real); s {
+		case scopeManaged, scopeAutoMemory:
 			return s
+		case scopeEditable:
+			editable = true
 		}
+	}
+	if sc == scopeEditable && !editable {
+		return scopeLinkOut
 	}
 	return sc
 }
@@ -139,7 +207,8 @@ func (r scopeRoots) realScope(real string, sc scope) scope {
 // resolved returns r with symlinks in its directories resolved, where they
 // exist.
 func (r scopeRoots) resolved() scopeRoots {
-	for _, dir := range []*string{&r.configRoot, &r.projectsDir, &r.managedPolicyDir} {
+	r.userRules = r.rulesDir()
+	for _, dir := range []*string{&r.configRoot, &r.projectsDir, &r.managedPolicyDir, &r.dataDir, &r.userRules} {
 		if *dir == "" {
 			continue // EvalSymlinks("") is ".", which would put the working directory in scope
 		}
@@ -155,6 +224,8 @@ func (r scopeRoots) resolved() scopeRoots {
 func (r scopeRoots) pathScope(p string) scope {
 	md := strings.EqualFold(filepath.Ext(p), ".md")
 	switch {
+	case r.within(r.dataDir, p):
+		return scopeOutside
 	case r.within(r.managedPolicyDir, p):
 		return scopeManaged
 	case r.isAutoMemoryPath(p):
@@ -166,10 +237,20 @@ func (r scopeRoots) pathScope(p string) scope {
 	if base := filepath.Base(p); base == "CLAUDE.md" || base == "CLAUDE.local.md" {
 		return scopeEditable
 	}
-	if md && (r.within(filepath.Join(r.configRoot, "rules"), p) || r.inClaudeRules(p)) {
+	if md && (r.within(r.rulesDir(), p) || r.inClaudeRules(p)) {
 		return scopeEditable
 	}
 	return scopeOutside
+}
+
+func (r scopeRoots) rulesDir() string {
+	if r.userRules != "" {
+		return r.userRules
+	}
+	if r.configRoot == "" {
+		return ""
+	}
+	return filepath.Join(r.configRoot, "rules")
 }
 
 // fold lower-cases p on darwin and windows, whose filesystems ignore case by
