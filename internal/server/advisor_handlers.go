@@ -112,12 +112,13 @@ func (s *Server) handleAdvisorApply(w http.ResponseWriter, r *http.Request) {
 	if fileMissing(w, file) {
 		return
 	}
-	if sc := s.memoryScope(file); !sc.editable() {
-		http.Error(w, sc.editRefusal(), http.StatusForbidden)
+	f := s.memoryScope(file)
+	if !f.editable() {
+		http.Error(w, f.editRefusal(), http.StatusForbidden)
 		return
 	}
 
-	current, err := os.ReadFile(file)
+	current, err := os.ReadFile(f.target)
 	if err != nil {
 		s.fail(w, "reading file", err)
 		return
@@ -133,12 +134,13 @@ func (s *Server) handleAdvisorApply(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now()
+	// Back up under the edited path, not its target: a roll back re-checks that path.
 	if _, err := s.trash.BackupBeforeWrite(file, now); err != nil {
 		s.fail(w, "backing up before write", err)
 		return
 	}
 	body := []byte(strings.ReplaceAll(edit.NewContent, "\r\n", "\n"))
-	if err := safeio.AtomicWrite(file, body, fileMode(file)); err != nil {
+	if err := safeio.AtomicWrite(f.target, body, fileMode(f.target)); err != nil {
 		s.fail(w, "applying edit", err)
 		return
 	}

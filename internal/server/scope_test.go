@@ -72,17 +72,105 @@ func TestClassify(t *testing.T) {
 
 	for _, c := range cases {
 		got := classify(c.path, roots)
-		if got != c.want {
-			t.Errorf("classify(%s) = %d, want %d", c.path, got, c.want)
+		if got.scope != c.want {
+			t.Errorf("classify(%s) = %d, want %d", c.path, got.scope, c.want)
+		}
+		if got.scope != scopeOutside && got.target != filepath.Clean(c.path) {
+			t.Errorf("classify(%s) target = %s, want the file itself", c.path, got.target)
 		}
 	}
 
 	wantEditable := map[scope]bool{scopeEditable: true}
-	wantDeletable := map[scope]bool{scopeEditable: true, scopeAutoMemory: true}
-	for _, sc := range []scope{scopeOutside, scopeManaged, scopeAutoMemory, scopeEditable} {
+	wantDeletable := map[scope]bool{scopeEditable: true, scopeAutoMemory: true, scopeLinkOut: true}
+	for _, sc := range []scope{scopeOutside, scopeManaged, scopeAutoMemory, scopeEditable, scopeLinkOut} {
 		if sc.editable() != wantEditable[sc] || sc.deletable() != wantDeletable[sc] {
 			t.Errorf("scope %d: editable=%v deletable=%v", sc, sc.editable(), sc.deletable())
 		}
+	}
+}
+
+func symlink(t *testing.T, target, path string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestClassifySymlinks(t *testing.T) {
+	root := t.TempDir()
+	roots := scopeRoots{
+		configRoot:       filepath.Join(root, "config"),
+		projectsDir:      filepath.Join(root, "config", "projects"),
+		managedPolicyDir: filepath.Join(root, "managed"),
+	}
+	work := filepath.Join(root, "work")
+	rules := filepath.Join(work, ".claude", "rules")
+	agents := filepath.Join(work, "AGENTS.md")
+	bashrc := filepath.Join(root, "outside", ".bashrc")
+	autoMemory := filepath.Join(roots.projectsDir, "p", "memory", "MEMORY.md")
+	policy := filepath.Join(roots.managedPolicyDir, "CLAUDE.md")
+	shared := filepath.Join(rules, "shared.md")
+	userRule := filepath.Join(roots.configRoot, "rules", "u.md")
+	guide := filepath.Join(work, "docs", "guide.md")
+	notes := filepath.Join(work, "txt", "notes.txt")
+	realAgents := filepath.Join(work, "real", "AGENTS.md")
+	for _, p := range []string{agents, bashrc, autoMemory, policy, shared, userRule, guide, notes, realAgents} {
+		writeTestFile(t, p, "x\n")
+	}
+	symlink(t, "AGENTS.md", filepath.Join(work, "real", "CLAUDE.md"))
+	symlink(t, "real", filepath.Join(work, "linked"))
+
+	cases := []struct {
+		name   string
+		path   string
+		want   scope
+		target string
+	}{
+		{"CLAUDE.md beside its target", symlink(t, "AGENTS.md", filepath.Join(work, "CLAUDE.md")), scopeEditable, agents},
+		{"rules file to another rules file", symlink(t, "shared.md", filepath.Join(rules, "y.md")), scopeEditable, shared},
+		{"rules file to a user rule", symlink(t, userRule, filepath.Join(rules, "z.md")), scopeEditable, userRule},
+		{"through a symlinked directory", filepath.Join(work, "linked", "CLAUDE.md"), scopeEditable, realAgents},
+		{"CLAUDE.md to .bashrc", symlink(t, "../../outside/.bashrc", filepath.Join(work, "bash", "CLAUDE.md")), scopeLinkOut, bashrc},
+		{"rules file to auto memory", symlink(t, autoMemory, filepath.Join(rules, "x.md")), scopeLinkOut, autoMemory},
+		{"CLAUDE.md to managed policy", symlink(t, policy, filepath.Join(work, "policy", "CLAUDE.md")), scopeLinkOut, policy},
+		{"CLAUDE.md to a .md elsewhere", symlink(t, "../docs/guide.md", filepath.Join(work, "other", "CLAUDE.md")), scopeLinkOut, guide},
+		{"CLAUDE.md to a non-.md beside it", symlink(t, "notes.txt", filepath.Join(work, "txt", "CLAUDE.md")), scopeLinkOut, notes},
+		{"dangling", symlink(t, "missing.md", filepath.Join(work, "gone", "CLAUDE.md")), scopeOutside, ""},
+		{"to a directory", symlink(t, "../docs", filepath.Join(work, "dir", "CLAUDE.md")), scopeOutside, ""},
+		{"named out of scope", symlink(t, "AGENTS.md", filepath.Join(work, "README.md")), scopeOutside, ""},
+	}
+	for _, c := range cases {
+		got := classify(c.path, roots)
+		if got.scope != c.want || got.target != c.target {
+			t.Errorf("%s: classify = %d %q, want %d %q", c.name, got.scope, got.target, c.want, c.target)
+		}
+		if got.scope == scopeLinkOut {
+			if !got.deletable() {
+				t.Errorf("%s: the link itself should be deletable", c.name)
+			}
+			assertContains(t, c.name+" refusal", got.editRefusal(), "symlink to "+c.target, "outside what ccmanager edits")
+		}
+	}
+
+	// A symlinked config dir must not hide auto memory behind its real path.
+	real := filepath.Join(root, "dotfiles")
+	hidden := filepath.Join(real, "projects", "p", "memory", "CLAUDE.md")
+	realRule := filepath.Join(real, "rules", "v.md")
+	writeTestFile(t, hidden, "x\n")
+	writeTestFile(t, realRule, "x\n")
+	linkedRoots := scopeRoots{configRoot: symlink(t, real, filepath.Join(root, "dotclaude"))}
+	linkedRoots.projectsDir = filepath.Join(linkedRoots.configRoot, "projects")
+	toHidden := symlink(t, filepath.Join(linkedRoots.projectsDir, "p", "memory", "CLAUDE.md"), filepath.Join(work, "hidden", "CLAUDE.md"))
+	if got := classify(toHidden, linkedRoots); got.scope != scopeLinkOut || got.target != hidden {
+		t.Errorf("link into auto memory under a symlinked config dir = %d %q, want %d %q", got.scope, got.target, scopeLinkOut, hidden)
+	}
+	toRule := symlink(t, filepath.Join(linkedRoots.configRoot, "rules", "v.md"), filepath.Join(rules, "v.md"))
+	if got := classify(toRule, linkedRoots); got.scope != scopeEditable || got.target != realRule {
+		t.Errorf("link to a user rule under a symlinked config dir = %d %q, want %d %q", got.scope, got.target, scopeEditable, realRule)
 	}
 }
 
@@ -103,6 +191,8 @@ func TestClassifyFoldsCaseOnDarwinAndWindows(t *testing.T) {
 		{autoMemory, scopeAutoMemory, scopeEditable},
 		{rule, scopeEditable, scopeOutside},
 		{userRule, scopeEditable, scopeOutside},
+		{symlink(t, managed, filepath.Join(root, "work", "a", "CLAUDE.md")), scopeLinkOut, scopeEditable},
+		{symlink(t, autoMemory, filepath.Join(root, "work", "b", "CLAUDE.md")), scopeLinkOut, scopeEditable},
 	}
 	for _, goos := range []string{"darwin", "windows", "linux"} {
 		roots := scopeRoots{
@@ -116,7 +206,7 @@ func TestClassifyFoldsCaseOnDarwinAndWindows(t *testing.T) {
 			if goos == "linux" {
 				want = c.exact
 			}
-			if got := classify(c.path, roots); got != want {
+			if got := classify(c.path, roots).scope; got != want {
 				t.Errorf("%s: classify(%s) = %d, want %d", goos, c.path, got, want)
 			}
 		}

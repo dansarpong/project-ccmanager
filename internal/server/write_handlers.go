@@ -25,16 +25,17 @@ func (s *Server) handleMemoryEdit(w http.ResponseWriter, r *http.Request) {
 	if fileMissing(w, path) {
 		return
 	}
-	if sc := s.memoryScope(path); !sc.editable() {
-		http.Error(w, sc.editRefusal(), http.StatusForbidden)
+	f := s.memoryScope(path)
+	if !f.editable() {
+		http.Error(w, f.editRefusal(), http.StatusForbidden)
 		return
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(f.target)
 	if err != nil {
 		s.fail(w, "reading file", err)
 		return
 	}
-	snap, err := safeio.Snapshot(path)
+	snap, err := safeio.Snapshot(f.target)
 	if err != nil {
 		s.fail(w, "snapshotting file", err)
 		return
@@ -68,8 +69,9 @@ func (s *Server) handleMemorySave(w http.ResponseWriter, r *http.Request) {
 	if fileMissing(w, path) {
 		return
 	}
-	if sc := s.memoryScope(path); !sc.editable() {
-		http.Error(w, sc.editRefusal(), http.StatusForbidden)
+	f := s.memoryScope(path)
+	if !f.editable() {
+		http.Error(w, f.editRefusal(), http.StatusForbidden)
 		return
 	}
 
@@ -81,13 +83,13 @@ func (s *Server) handleMemorySave(w http.ResponseWriter, r *http.Request) {
 
 	// Detect an on-disk change since the file was opened, unless the user chose
 	// to overwrite anyway.
-	changed, err := safeio.Changed(path, prev)
+	changed, err := safeio.Changed(f.target, prev)
 	if err != nil {
 		s.fail(w, "checking for on-disk changes", err)
 		return
 	}
 	if changed && !force {
-		cur, _ := safeio.Snapshot(path)
+		cur, _ := safeio.Snapshot(f.target)
 		s.page(w, r, "_save_conflict.html", map[string]any{
 			"Title":   "Conflict — ccmanager",
 			"Active":  "memory",
@@ -99,13 +101,14 @@ func (s *Server) handleMemorySave(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now()
+	// Back up under the edited path, not its target: a roll back re-checks that path.
 	if _, err := s.trash.BackupBeforeWrite(path, now); err != nil {
 		s.fail(w, "backing up before write", err)
 		return
 	}
 	// Normalize CRLF that browsers may submit, and preserve file mode.
 	body := []byte(strings.ReplaceAll(content, "\r\n", "\n"))
-	if err := safeio.AtomicWrite(path, body, fileMode(path)); err != nil {
+	if err := safeio.AtomicWrite(f.target, body, fileMode(f.target)); err != nil {
 		s.fail(w, "writing file", err)
 		return
 	}

@@ -15,10 +15,13 @@ const (
 	scopeManaged                 // managed policy: view only
 	scopeAutoMemory              // auto memory, which Claude Code writes: view and delete
 	scopeEditable                // CLAUDE.md, CLAUDE.local.md and rules: view, edit and delete
+	scopeLinkOut                 // a memory file symlinked out of scope: delete the link only
 )
 
-func (sc scope) editable() bool  { return sc == scopeEditable }
-func (sc scope) deletable() bool { return sc == scopeEditable || sc == scopeAutoMemory }
+func (sc scope) editable() bool { return sc == scopeEditable }
+func (sc scope) deletable() bool {
+	return sc == scopeEditable || sc == scopeAutoMemory || sc == scopeLinkOut
+}
 
 func (sc scope) editRefusal() string {
 	switch sc {
@@ -37,6 +40,20 @@ func (sc scope) deleteRefusal() string {
 	return "only CLAUDE.md, CLAUDE.local.md, rules and auto memory files can be moved to the trash"
 }
 
+// scopedFile is a path's scope and its target, the regular file that reading
+// or writing the path touches: the path itself, or a symlink's resolved target.
+type scopedFile struct {
+	scope
+	target string
+}
+
+func (f scopedFile) editRefusal() string {
+	if f.scope == scopeLinkOut {
+		return "this file is a symlink to " + f.target + ", outside what ccmanager edits"
+	}
+	return f.scope.editRefusal()
+}
+
 // scopeRoots are the directories that decide a file's scope, and the OS, which
 // decides whether comparing paths ignores case.
 type scopeRoots struct {
@@ -46,21 +63,76 @@ type scopeRoots struct {
 	goos             string
 }
 
-func (s *Server) memoryScope(path string) scope {
+func (s *Server) memoryScope(path string) scopedFile {
 	return classify(path, scopeRoots{configRoot: s.cfg.ConfigRoot, projectsDir: s.cfg.ProjectsDir, managedPolicyDir: managedPolicyDir, goos: runtime.GOOS})
 }
 
-// classify returns path's scope. Only an existing regular file can be in
-// scope; anything in the managed-policy directory is view only.
-func classify(path string, roots scopeRoots) scope {
+// classify returns path's scope and target. Only a regular file, or a symlink
+// to one, can be in scope; anything in the managed-policy directory is view
+// only. A symlink named as a memory file is editable only when its target is
+// in scope on its own or is a .md file beside it (CLAUDE.md -> AGENTS.md);
+// otherwise just the link can be deleted.
+func classify(path string, roots scopeRoots) scopedFile {
 	p, err := filepath.Abs(path)
 	if err != nil {
-		return scopeOutside
+		return scopedFile{}
 	}
-	if info, err := os.Stat(p); err != nil || !info.Mode().IsRegular() {
-		return scopeOutside
+	info, err := os.Lstat(p)
+	if err != nil {
+		return scopedFile{}
 	}
-	return roots.pathScope(p)
+	sc := roots.pathScope(p)
+	if info.Mode().IsRegular() {
+		return scopedFile{scope: sc, target: p}
+	}
+	if sc == scopeOutside || info.Mode()&os.ModeSymlink == 0 {
+		return scopedFile{}
+	}
+	target, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return scopedFile{}
+	}
+	if ti, err := os.Lstat(target); err != nil || !ti.Mode().IsRegular() {
+		return scopedFile{}
+	}
+	if sc == scopeEditable && !roots.linkTargetEditable(p, target) {
+		sc = scopeLinkOut
+	}
+	return scopedFile{scope: sc, target: target}
+}
+
+// linkTargetEditable reports whether target, the resolved target of the
+// symlink link, may be edited through it. The roots are checked as given and
+// resolved, so a symlinked config dir can't hide auto memory.
+func (r scopeRoots) linkTargetEditable(link, target string) bool {
+	inScope := false
+	for _, rr := range []scopeRoots{r, r.resolved()} {
+		switch rr.pathScope(target) {
+		case scopeManaged, scopeAutoMemory:
+			return false
+		case scopeEditable:
+			inScope = true
+		}
+	}
+	if inScope {
+		return true
+	}
+	dir, err := filepath.EvalSymlinks(filepath.Dir(link))
+	return err == nil && dir == filepath.Dir(target) && strings.EqualFold(filepath.Ext(target), ".md")
+}
+
+// resolved returns r with symlinks in its directories resolved, where they
+// exist.
+func (r scopeRoots) resolved() scopeRoots {
+	for _, dir := range []*string{&r.configRoot, &r.projectsDir, &r.managedPolicyDir} {
+		if *dir == "" {
+			continue // EvalSymlinks("") is ".", which would put the working directory in scope
+		}
+		if p, err := filepath.EvalSymlinks(*dir); err == nil {
+			*dir = p
+		}
+	}
+	return r
 }
 
 // pathScope applies the name and directory rules to the absolute path p,
