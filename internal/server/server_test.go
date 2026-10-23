@@ -188,7 +188,7 @@ func TestHTMXWritesKeepSafetyNet(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("memory delete = %d: %s", rec.Code, rec.Body.String())
 	}
-	assertContains(t, "memory delete", rec.Body.String(), `id="count-memory" hx-swap-oob="true">3</span>`, `id="count-trash" hx-swap-oob="true">1</span>`)
+	assertContains(t, "memory delete", rec.Body.String(), `id="count-memory" hx-swap-oob="true">4</span>`, `id="count-trash" hx-swap-oob="true">1</span>`)
 	if _, err := os.Stat(topic); !os.IsNotExist(err) {
 		t.Errorf("deleted file still in place: %v", err)
 	}

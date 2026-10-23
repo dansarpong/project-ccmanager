@@ -7,47 +7,60 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/dansarpong/ccmanager/internal/memory"
 )
 
 // InventoryItem is one memory file found on the machine.
 type InventoryItem struct {
-	Path     string
-	Kind     string // "user" | "user-rule" | "auto-memory" | "auto-memory-topic"
-	Lines    int
-	Size     int64
-	ModTime  string // RFC 3339
-	Content  string
-	ReadOnly bool // auto-memory is view-and-delete only in v1
-	TooLong  bool // over the 200-line guideline (a quick lint badge)
+	Path      string
+	Kind      string // an engine layer (memory.Layer*), "auto-memory" or "auto-memory-topic"
+	Dir       string // the directory a project-layer file belongs to
+	Lines     int
+	Size      int64
+	ModTime   string // RFC 3339
+	Content   string
+	ReadOnly  bool // managed policy and auto memory can't be edited
+	Deletable bool // everything but managed policy can be moved to the trash
+	TooLong   bool // over the 200-line guideline (a quick lint badge)
 }
 
 const inventoryLineWarn = 200
 
 // inventoryFile is a memory file's location and kind, found without reading it.
 type inventoryFile struct {
-	Path     string
-	Kind     string
-	ReadOnly bool
+	Path      string
+	Kind      string
+	Dir       string
+	ReadOnly  bool
+	Deletable bool
 }
 
-// inventoryFiles lists every memory file ccmanager knows how to find: the
-// user-level CLAUDE.md and rules, and every project's auto-memory directory
-// under ProjectsDir. Per-project CLAUDE.md files in the working trees are shown
-// in the per-project resolved view (which knows the working dir); the global
-// inventory focuses on the files living under the config root.
-func inventoryFiles(configRoot, projectsDir string) ([]inventoryFile, error) {
+// inventoryFiles lists every memory file ccmanager knows how to find, by stat
+// alone: everything the engine loads for any project recorded in the
+// transcripts (managed policy, the user's CLAUDE.md and rules, and each
+// project's CLAUDE.md, CLAUDE.local.md and rules up to the filesystem root),
+// plus every project's auto memory under ProjectsDir. A project whose
+// directory is gone contributes nothing.
+func (s *Server) inventoryFiles() ([]inventoryFile, error) {
+	projects, err := s.store.DistinctProjects()
+	if err != nil {
+		return nil, err
+	}
+	var live []string
+	for _, p := range projects {
+		if isDir(p) {
+			live = append(live, p)
+		}
+	}
 	var files []inventoryFile
-	if configRoot != "" {
-		if user := filepath.Join(configRoot, "CLAUDE.md"); isFile(user) {
-			files = append(files, inventoryFile{Path: user, Kind: "user"})
-		}
-		for _, r := range mdFiles(filepath.Join(configRoot, "rules")) {
-			files = append(files, inventoryFile{Path: r, Kind: "user-rule"})
-		}
+	for _, c := range memory.CandidatesAcross(s.memoryInput(), live) {
+		managed := c.Layer == memory.LayerManaged
+		files = append(files, inventoryFile{Path: c.Path, Kind: c.Layer, Dir: c.Dir, ReadOnly: managed, Deletable: !managed})
 	}
 
 	// Auto-memory under each project directory.
-	entries, err := os.ReadDir(projectsDir)
+	entries, err := os.ReadDir(s.cfg.ProjectsDir)
 	if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("reading projects dir: %w", err)
 	}
@@ -55,13 +68,13 @@ func inventoryFiles(configRoot, projectsDir string) ([]inventoryFile, error) {
 		if !e.IsDir() {
 			continue
 		}
-		memDir := filepath.Join(projectsDir, e.Name(), "memory")
+		memDir := filepath.Join(s.cfg.ProjectsDir, e.Name(), "memory")
 		for _, m := range mdFiles(memDir) {
 			kind := "auto-memory-topic"
 			if strings.EqualFold(filepath.Base(m), "MEMORY.md") {
 				kind = "auto-memory"
 			}
-			files = append(files, inventoryFile{Path: m, Kind: kind, ReadOnly: true}) // auto-memory is read-only in v1
+			files = append(files, inventoryFile{Path: m, Kind: kind, ReadOnly: true, Deletable: true})
 		}
 	}
 
@@ -70,8 +83,8 @@ func inventoryFiles(configRoot, projectsDir string) ([]inventoryFile, error) {
 }
 
 // scanInventory reads every file inventoryFiles finds.
-func scanInventory(configRoot, projectsDir string) ([]InventoryItem, error) {
-	files, err := inventoryFiles(configRoot, projectsDir)
+func (s *Server) scanInventory() ([]InventoryItem, error) {
+	files, err := s.inventoryFiles()
 	if err != nil {
 		return nil, err
 	}
@@ -84,22 +97,28 @@ func scanInventory(configRoot, projectsDir string) ([]InventoryItem, error) {
 		data, _ := os.ReadFile(f.Path)
 		lines := countFileLines(data)
 		items = append(items, InventoryItem{
-			Path:     f.Path,
-			Kind:     f.Kind,
-			Lines:    lines,
-			Size:     info.Size(),
-			ModTime:  info.ModTime().UTC().Format(time.RFC3339),
-			Content:  string(data),
-			ReadOnly: f.ReadOnly,
-			TooLong:  lines > inventoryLineWarn,
+			Path:      f.Path,
+			Kind:      f.Kind,
+			Dir:       f.Dir,
+			Lines:     lines,
+			Size:      info.Size(),
+			ModTime:   info.ModTime().UTC().Format(time.RFC3339),
+			Content:   string(data),
+			ReadOnly:  f.ReadOnly,
+			Deletable: f.Deletable,
+			TooLong:   lines > inventoryLineWarn,
 		})
 	}
 	return items, nil
 }
 
-func isFile(path string) bool {
+func isDir(path string) bool {
 	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
+	return err == nil && info.IsDir()
+}
+
+func isAutoMemoryKind(kind string) bool {
+	return strings.HasPrefix(kind, "auto-memory")
 }
 
 func mdFiles(dir string) []string {
@@ -134,8 +153,12 @@ func countFileLines(data []byte) int {
 }
 
 var inventoryKindLabels = map[string]string{
+	"managed":           "Managed policy",
 	"user":              "User CLAUDE.md",
 	"user-rule":         "User rule",
+	"project":           "Project CLAUDE.md",
+	"project-local":     "Project CLAUDE.local.md",
+	"project-rule":      "Project rule",
 	"auto-memory":       "Auto memory index",
 	"auto-memory-topic": "Auto memory topic",
 }
@@ -147,7 +170,7 @@ type memoryEntry struct {
 	Path            string
 	Kind            string
 	KindLabel       string
-	Project         string // the project an auto-memory file belongs to
+	Project         string // the project a project or auto-memory file belongs to
 	Preview         string
 	SourceSessionID string // originSessionId from the frontmatter, if any
 	SourceIndexed   bool   // the source session is in the index, so a link works
@@ -155,6 +178,8 @@ type memoryEntry struct {
 	Lines           int
 	Size            int64
 	ReadOnly        bool
+	ReadOnlyNote    string // why ReadOnly, for the disabled actions
+	Deletable       bool
 	TooLong         bool
 	Open            bool
 	Body            codeBlockView
@@ -169,14 +194,22 @@ func newMemoryEntry(it InventoryItem) memoryEntry {
 		Path:            it.Path,
 		Kind:            it.Kind,
 		KindLabel:       inventoryKindLabels[it.Kind],
+		Project:         tildePath(it.Dir),
 		Preview:         fields["description"],
 		SourceSessionID: fields["originSessionId"],
 		UpdatedAt:       it.ModTime,
 		Lines:           it.Lines,
 		Size:            it.Size,
 		ReadOnly:        it.ReadOnly,
+		Deletable:       it.Deletable,
 		TooLong:         it.TooLong,
 		Body:            codeBlock("body-"+id, tildePath(it.Path), it.Content),
+	}
+	if it.ReadOnly {
+		e.ReadOnlyNote = "Auto memory is read-only"
+		if it.Kind == memory.LayerManaged {
+			e.ReadOnlyNote = "Managed policy is read-only"
+		}
 	}
 	if e.Title == "" {
 		e.Title = fields["name"]
@@ -249,13 +282,13 @@ func autoMemoryProject(projectsDir, path string) string {
 }
 
 // matchesInventoryKind applies the inventory's kind filter; "auto-memory"
-// covers both the index and topic files.
+// covers both the index and topic files, and "project" every project file.
 func matchesInventoryKind(kind, filter string) bool {
 	switch filter {
 	case "":
 		return true
-	case "auto-memory":
-		return strings.HasPrefix(kind, "auto-memory")
+	case "auto-memory", "project":
+		return kind == filter || strings.HasPrefix(kind, filter+"-")
 	default:
 		return kind == filter
 	}

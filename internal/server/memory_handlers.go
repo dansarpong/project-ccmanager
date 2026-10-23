@@ -91,7 +91,7 @@ func (s *Server) handleMemoryLint(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMemoryInventory(w http.ResponseWriter, r *http.Request) {
-	items, err := scanInventory(s.cfg.ConfigRoot, s.cfg.ProjectsDir)
+	items, err := s.scanInventory()
 	if err != nil {
 		s.fail(w, "scanning memory inventory", err)
 		return
@@ -105,17 +105,17 @@ func (s *Server) handleMemoryInventory(w http.ResponseWriter, r *http.Request) {
 	// its encoded projects/ folder name instead.
 	dirs, _ := s.store.ProjectPathsByDir()
 	entries := []memoryEntry{}
-	readOnly := 0
+	autoMemory := 0
 	for _, it := range items {
-		if it.ReadOnly {
-			readOnly++
+		if isAutoMemoryKind(it.Kind) {
+			autoMemory++
 		}
 		e := newMemoryEntry(it)
 		if !matchesInventoryKind(it.Kind, kind) || !containsAll(it.Path+" "+e.Title, terms) {
 			continue
 		}
 		e.Open = e.ID == open
-		if it.ReadOnly {
+		if isAutoMemoryKind(it.Kind) {
 			folder := autoMemoryProject(s.cfg.ProjectsDir, it.Path)
 			e.Project = folder
 			if path, ok := dirs[folder]; ok {
@@ -129,14 +129,14 @@ func (s *Server) handleMemoryInventory(w http.ResponseWriter, r *http.Request) {
 		entries = append(entries, e)
 	}
 	data := map[string]any{
-		"Title":    "Memory — ccmanager",
-		"Active":   "memory",
-		"Entries":  entries,
-		"Total":    len(items),
-		"ReadOnly": readOnly,
-		"Query":    q,
-		"Kind":     kind,
-		"Filtered": q != "" || kind != "",
+		"Title":      "Memory — ccmanager",
+		"Active":     "memory",
+		"Entries":    entries,
+		"Total":      len(items),
+		"AutoMemory": autoMemory,
+		"Query":      q,
+		"Kind":       kind,
+		"Filtered":   q != "" || kind != "",
 	}
 	s.page(w, r, "memory_inventory.html", data)
 }

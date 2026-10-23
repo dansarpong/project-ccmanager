@@ -2,8 +2,8 @@
   <header class="page-header">
     <h1 class="page-header__title">Memory</h1>
     <div class="page-header__meta">
-      <span>{{.Total}} {{if eq .Total 1}}file{{else}}files{{end}} under the config root</span>
-      {{if .ReadOnly}}<span>Auto memory is read-only</span>{{end}}
+      <span>{{.Total}} {{if eq .Total 1}}file{{else}}files{{end}} across your projects</span>
+      {{if .AutoMemory}}<span>Auto memory is read-only</span>{{end}}
     </div>
     <div class="page-header__actions">
       <a class="btn btn--secondary" href="/memory/resolve">{{template "icon" "i-folder"}}Resolve for a directory</a>
@@ -23,8 +23,11 @@
             hx-get="/memory" hx-include="#memory-q"
             hx-target="#memory-list" hx-select="#memory-list > *" hx-swap="innerHTML" hx-indicator="#memory-list">
       <option value="">All kinds</option>
+      <option value="managed"{{if eq .Kind "managed"}} selected{{end}}>Managed policy</option>
       <option value="user"{{if eq .Kind "user"}} selected{{end}}>User CLAUDE.md</option>
       <option value="user-rule"{{if eq .Kind "user-rule"}} selected{{end}}>User rules</option>
+      <option value="project"{{if eq .Kind "project"}} selected{{end}}>Project memory</option>
+      <option value="project-rule"{{if eq .Kind "project-rule"}} selected{{end}}>Project rules</option>
       <option value="auto-memory"{{if eq .Kind "auto-memory"}} selected{{end}}>Auto memory</option>
     </select>
   </div>
@@ -83,16 +86,21 @@
   <div class="memory-entry__actions">
     {{if .ReadOnly}}
     <button class="btn btn--ghost btn--icon" type="button" aria-disabled="true"
-            aria-label="Edit — auto memory is read-only" title="Auto memory is read-only">{{template "icon" "i-edit"}}</button>
+            aria-label="Edit — {{.ReadOnlyNote}}" title="{{.ReadOnlyNote}}">{{template "icon" "i-edit"}}</button>
     {{else}}
     <a class="btn btn--ghost btn--icon" href="/memory/edit?path={{.Path}}" aria-label="Edit" title="Edit">{{template "icon" "i-edit"}}</a>
     {{end}}
+    {{if .Deletable}}
     <form method="post" action="/memory/delete"
           hx-post="/memory/delete" hx-target="#memory-{{.ID}}" hx-swap="outerHTML"
           hx-confirm="Move this file to the trash? You can restore it for 30 days.">
       <input type="hidden" name="path" value="{{.Path}}">
       <button class="btn btn--ghost btn--icon btn--danger" type="submit" aria-label="Move to trash" title="Move to trash">{{template "icon" "i-trash"}}</button>
     </form>
+    {{else}}
+    <button class="btn btn--ghost btn--icon btn--danger" type="button" aria-disabled="true"
+            aria-label="Move to trash — {{.ReadOnlyNote}}" title="{{.ReadOnlyNote}}">{{template "icon" "i-trash"}}</button>
+    {{end}}
   </div>
 </li>
 {{end}}

@@ -102,7 +102,7 @@ func (s *Server) shell(r *http.Request, active, project string) shell {
 func (s *Server) nav(active, project string) []navItem {
 	sessionsN, _ := s.store.CountSessions()
 	trashN, _ := s.store.CountTrash()
-	files, _ := inventoryFiles(s.cfg.ConfigRoot, s.cfg.ProjectsDir)
+	files, _ := s.inventoryFiles()
 	return []navItem{
 		{Key: "sessions", Href: "/sessions", Icon: "i-sessions", Label: "Sessions", Count: sessionsN,
 			Current: active == "sessions" && project == ""},
@@ -181,7 +181,7 @@ func (s *Server) palette(q string) paletteView {
 	}
 	if len(terms) > 0 {
 		g := paletteGroup{Key: "memory", Label: "Memory"}
-		files, _ := inventoryFiles(s.cfg.ConfigRoot, s.cfg.ProjectsDir)
+		files, _ := s.inventoryFiles()
 		dirs, _ := s.store.ProjectPathsByDir()
 		for _, f := range files {
 			if !containsAll(tildePath(f.Path), terms) {
@@ -190,7 +190,7 @@ func (s *Server) palette(q string) paletteView {
 			// Paths truncate from the end, which hides the file name, so the
 			// name is the label and the folder or project is the meta.
 			meta := tildePath(filepath.Dir(f.Path))
-			if f.ReadOnly {
+			if isAutoMemoryKind(f.Kind) {
 				meta = autoMemoryProject(s.cfg.ProjectsDir, f.Path)
 				if path, ok := dirs[meta]; ok {
 					meta = filepath.Base(path)
