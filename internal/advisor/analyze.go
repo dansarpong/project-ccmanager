@@ -44,12 +44,19 @@ type Advisor struct {
 	clock  func() time.Time
 }
 
-// NewAdvisor returns an Advisor using the claude binary at bin. If bin is
-// empty, the runner is still constructed; calls will surface
+// CLI says how the Advisor runs claude.
+type CLI struct {
+	Bin        string // the claude binary
+	WorkDir    string // private, empty working directory, created on first use
+	ManagedDir string // Claude Code's managed-settings directory; "" if none
+}
+
+// NewAdvisor returns an Advisor that runs claude as cli describes. If cli.Bin
+// is empty, the runner is still constructed; calls will surface
 // ErrClaudeUnavailable when the binary cannot be executed.
-func NewAdvisor(bin string, cache Cache) *Advisor {
+func NewAdvisor(cli CLI, cache Cache) *Advisor {
 	return &Advisor{
-		runner: cliRunner{bin: bin},
+		runner: cliRunner{bin: cli.Bin, workDir: cli.WorkDir, managedDir: cli.ManagedDir},
 		cache:  cache,
 		clock:  time.Now,
 	}

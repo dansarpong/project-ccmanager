@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -43,21 +46,66 @@ type claudeRunner interface {
 type cliRunner struct {
 	bin          string
 	systemPrompt string
+	workDir      string
+	managedDir   string
 }
 
-func (c cliRunner) run(ctx context.Context, stdin string) (resultEnvelope, error) {
-	// No --bare: it breaks subscription auth (you get "Not logged in" even when
-	// logged in). The no-tools sandbox comes from the --tools flags below.
+// cliArgs is the print-mode command line: no built-in or MCP tools, no saved
+// transcript, no skills or slash commands, and no hooks.
+//
+// No --bare: it breaks subscription auth (you get "Not logged in" even when
+// logged in), and no --setting-sources, which would drop apiKeyHelper and env
+// from user settings. Without --bare, claude loads the hooks, .mcp.json and
+// CLAUDE.md of its working directory, so command pins that to an empty one.
+func cliArgs(systemPrompt string, strictMCP bool) []string {
 	args := []string{
 		"-p",
 		"--output-format", "json",
 		"--tools", "",
 		"--allowed-tools", "",
+		"--disallowed-tools", "mcp__*",
+		"--no-session-persistence",
+		"--disable-slash-commands",
+		"--settings", `{"disableAllHooks":true}`,
 	}
-	if c.systemPrompt != "" {
-		args = append(args, "--append-system-prompt", c.systemPrompt)
+	// Claude Code exits at startup on --strict-mcp-config while a managed-mcp.json is deployed.
+	if strictMCP {
+		args = append(args, "--strict-mcp-config")
 	}
-	cmd := exec.CommandContext(ctx, c.bin, args...)
+	if systemPrompt != "" {
+		args = append(args, "--append-system-prompt", systemPrompt)
+	}
+	return args
+}
+
+// command prepares the private work dir and builds the claude invocation.
+func (c cliRunner) command(ctx context.Context) (*exec.Cmd, error) {
+	if err := os.MkdirAll(c.workDir, 0o700); err != nil {
+		return nil, fmt.Errorf("creating advisor work dir: %w", err)
+	}
+	if err := os.Chmod(c.workDir, 0o700); err != nil {
+		return nil, fmt.Errorf("securing advisor work dir: %w", err)
+	}
+	cmd := exec.CommandContext(ctx, c.bin, cliArgs(c.systemPrompt, !managedMCPDeployed(c.managedDir))...)
+	cmd.Dir = c.workDir
+	return cmd, nil
+}
+
+// managedMCPDeployed reports whether managedDir may hold a managed-mcp.json;
+// anything but "does not exist" counts, so a stat error never adds the flag.
+func managedMCPDeployed(managedDir string) bool {
+	if managedDir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(managedDir, "managed-mcp.json"))
+	return !errors.Is(err, fs.ErrNotExist)
+}
+
+func (c cliRunner) run(ctx context.Context, stdin string) (resultEnvelope, error) {
+	cmd, err := c.command(ctx)
+	if err != nil {
+		return resultEnvelope{}, err
+	}
 	cmd.Stdin = strings.NewReader(stdin)
 	var out, errOut bytes.Buffer
 	cmd.Stdout = &out

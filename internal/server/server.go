@@ -8,6 +8,8 @@ import (
 	"html/template"
 	"net"
 	"net/http"
+	"path/filepath"
+	"runtime"
 
 	"github.com/dansarpong/ccmanager/internal/advisor"
 	"github.com/dansarpong/ccmanager/internal/config"
@@ -31,13 +33,31 @@ func New(cfg config.Config, st *store.Store, tr *trash.Trash) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parsing templates: %w", err)
 	}
+	cli := advisor.CLI{
+		Bin:        cfg.ClaudeBin,
+		WorkDir:    filepath.Join(cfg.DataDir, "advisor"),
+		ManagedDir: managedDir(runtime.GOOS),
+	}
 	return &Server{
 		cfg:     cfg,
 		store:   st,
 		trash:   tr,
-		advisor: advisor.NewAdvisor(cfg.ClaudeBin, st),
+		advisor: advisor.NewAdvisor(cli, st),
 		tmpl:    tmpl,
 	}, nil
+}
+
+// managedDir is where Claude Code reads managed (policy) settings on goos.
+func managedDir(goos string) string {
+	switch goos {
+	case "linux":
+		return "/etc/claude-code"
+	case "darwin":
+		return "/Library/Application Support/ClaudeCode"
+	case "windows":
+		return `C:\Program Files\ClaudeCode`
+	}
+	return ""
 }
 
 // Routes returns the HTTP handler with all routes registered, using Go 1.22+
