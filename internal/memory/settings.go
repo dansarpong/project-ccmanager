@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // settings is the subset of a Claude Code settings file the engine reads.
@@ -12,43 +13,82 @@ type settings struct {
 	AutoMemoryDirectory string   `json:"autoMemoryDirectory"`
 }
 
-// loadExcludes reads claudeMdExcludes from the settings layers ccmanager
-// supports and merges them (arrays merge across layers, per the docs). v1 reads
-// the user-level settings and the project's local settings; it does not read
-// managed-policy settings (documented in the README).
-func loadExcludes(configRoot, workdir string) []string {
-	var out []string
-	for _, path := range settingsPaths(configRoot, workdir) {
+// ManagedDir returns the directory Claude Code reads managed-policy files
+// (CLAUDE.md and managed-settings.json) from on goos, a runtime.GOOS value.
+func ManagedDir(goos string) string {
+	switch goos {
+	case "darwin":
+		return "/Library/Application Support/ClaudeCode"
+	case "windows":
+		return `C:\Program Files\ClaudeCode`
+	default:
+		return "/etc/claude-code"
+	}
+}
+
+// loadSettings reads every settings layer that applies to workdir, highest
+// precedence first: managed, local, project, user. Missing or malformed files
+// are skipped.
+func loadSettings(in Input, workdir string, r repo) []settings {
+	var out []settings
+	for _, path := range settingsPaths(in, workdir, r) {
 		if s, ok := readSettings(path); ok {
-			out = append(out, s.ClaudeMdExcludes...)
+			out = append(out, s)
 		}
 	}
 	return out
 }
 
-// autoMemoryDir returns an overridden auto-memory directory from settings, or
-// "" if none is set. A leading ~/ is expanded against the user's home dir.
-func autoMemoryDir(configRoot, workdir string) string {
-	for _, path := range settingsPaths(configRoot, workdir) {
-		if s, ok := readSettings(path); ok && s.AutoMemoryDirectory != "" {
-			return expandHome(s.AutoMemoryDirectory)
+// settingsPaths lists the settings files in loadSettings' order. Local settings
+// live at the main checkout's root, except outside git, on Windows or when that
+// root is the home dir; the copy that versions before 2.1.211 kept in the
+// working dir is still read, below the root's.
+func settingsPaths(in Input, workdir string, r repo) []string {
+	var paths []string
+	if in.ManagedSettingsPath != "" {
+		paths = append(paths, in.ManagedSettingsPath)
+	}
+	legacy := filepath.Join(workdir, ".claude", "settings.local.json")
+	if r.inGit && in.goos() != "windows" && r.main != in.home() {
+		if root := filepath.Join(r.main, ".claude", "settings.local.json"); root != legacy {
+			paths = append(paths, root)
 		}
 	}
-	return ""
+	paths = append(paths, legacy, filepath.Join(workdir, ".claude", "settings.json"))
+	if in.ConfigRoot != "" {
+		paths = append(paths, filepath.Join(in.ConfigRoot, "settings.json"))
+	}
+	return paths
 }
 
-// settingsPaths lists the settings files to consult, broadest first so later
-// (more specific) layers can extend the earlier ones.
-func settingsPaths(configRoot, workdir string) []string {
-	var paths []string
-	if configRoot != "" {
-		paths = append(paths, filepath.Join(configRoot, "settings.json"))
+// mergeExcludes merges claudeMdExcludes across layers (arrays merge, per the
+// docs).
+func mergeExcludes(layers []settings) []string {
+	var out []string
+	for _, s := range layers {
+		out = append(out, s.ClaudeMdExcludes...)
 	}
-	paths = append(paths,
-		filepath.Join(workdir, ".claude", "settings.json"),
-		filepath.Join(workdir, ".claude", "settings.local.json"),
-	)
-	return paths
+	return out
+}
+
+// autoMemoryDir returns the autoMemoryDirectory override from the
+// highest-precedence layer that sets one, or "" if none does or the value is
+// neither absolute nor ~/-relative. A leading ~/ is expanded against home.
+func autoMemoryDir(layers []settings, home string) string {
+	for _, s := range layers {
+		dir := s.AutoMemoryDirectory
+		if dir == "" {
+			continue
+		}
+		if rest, ok := strings.CutPrefix(dir, "~/"); ok && home != "" {
+			dir = filepath.Join(home, rest)
+		}
+		if !filepath.IsAbs(dir) {
+			return ""
+		}
+		return filepath.Clean(dir)
+	}
+	return ""
 }
 
 func readSettings(path string) (settings, bool) {

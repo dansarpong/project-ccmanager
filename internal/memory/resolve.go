@@ -4,17 +4,39 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 )
 
 // Input is the pure engine's configuration. It is deliberately minimal (and
 // independent of internal/config) so Resolve stays easy to test with a fake
-// config root and a managed-policy path pointed at a fixture.
+// config root and managed-policy paths pointed at fixtures.
 type Input struct {
-	ConfigRoot  string // ~/.claude or $CLAUDE_CONFIG_DIR
-	ProjectsDir string // ConfigRoot/projects (for locating auto-memory)
-	ManagedPath string // managed-policy CLAUDE.md path; "" disables (default /etc/claude-code/CLAUDE.md on Linux)
+	ConfigRoot          string // ~/.claude or $CLAUDE_CONFIG_DIR
+	ProjectsDir         string // ConfigRoot/projects (for locating auto-memory)
+	ManagedPath         string // managed-policy CLAUDE.md (in ManagedDir); "" disables
+	ManagedSettingsPath string // managed-settings.json (in ManagedDir); "" disables
+	HomeDir             string // the user's home dir; "" means os.UserHomeDir
+	GOOS                string // the OS whose rules apply; "" means runtime.GOOS
+}
+
+func (in Input) home() string {
+	home := in.HomeDir
+	if home == "" {
+		home, _ = os.UserHomeDir()
+	}
+	if home == "" {
+		return ""
+	}
+	return filepath.Clean(home)
+}
+
+func (in Input) goos() string {
+	if in.GOOS == "" {
+		return runtime.GOOS
+	}
+	return in.GOOS
 }
 
 // Resolve assembles the memory stack for workdir. It never returns an error
@@ -28,8 +50,9 @@ func Resolve(in Input, workdir string) (*ResolvedStack, error) {
 
 	stack := &ResolvedStack{Workdir: abs, ConfigRoot: in.ConfigRoot}
 
-	excludes := loadExcludes(in.ConfigRoot, abs)
 	r := findRepo(abs)
+	layers := loadSettings(in, abs, r)
+	excludes := mergeExcludes(layers)
 
 	var sources []Source
 	for i, c := range collectCandidates(in, abs) {
@@ -54,7 +77,7 @@ func Resolve(in Input, workdir string) (*ResolvedStack, error) {
 	}
 	stack.Sources = sources
 
-	stack.AutoMemory = resolveAutoMemory(in, abs, r.main)
+	stack.AutoMemory = resolveAutoMemory(in, layers, r.main)
 	return stack, nil
 }
 
@@ -154,7 +177,8 @@ func globRules(dir string) []string {
 }
 
 // readSource reads one candidate file, parses any paths: frontmatter, and
-// applies claudeMdExcludes. Read errors are recorded, not returned.
+// applies claudeMdExcludes, which can't exclude the managed CLAUDE.md. Read
+// errors are recorded, not returned.
 func readSource(c candidate, excludes []string) Source {
 	s := Source{Path: c.path, Layer: c.layer}
 	data, err := os.ReadFile(c.path)
@@ -170,7 +194,7 @@ func readSource(c candidate, excludes []string) Source {
 			s.Paths = paths
 		}
 	}
-	if matchesAny(c.path, excludes) {
+	if c.layer != LayerManaged && matchesAny(c.path, excludes) {
 		s.Excluded = true
 	}
 	return s

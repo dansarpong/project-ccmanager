@@ -13,8 +13,8 @@ import (
 // is the main checkout's root so every worktree of a repo shares it, but a
 // settings autoMemoryDirectory override takes precedence. Returns nil if no
 // memory directory can be found.
-func resolveAutoMemory(in Input, workdir, mainRoot string) *AutoMemory {
-	dir := autoMemoryDir(in.ConfigRoot, workdir)
+func resolveAutoMemory(in Input, layers []settings, mainRoot string) *AutoMemory {
+	dir := autoMemoryDir(layers, in.home())
 	if dir == "" {
 		dir = projectMemoryDir(in.ProjectsDir, mainRoot)
 	}

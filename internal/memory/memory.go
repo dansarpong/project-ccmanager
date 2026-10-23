@@ -11,7 +11,7 @@ package memory
 
 // Layer names a source's scope, in increasing specificity.
 const (
-	LayerManaged      = "managed"       // /etc/claude-code/CLAUDE.md (org policy)
+	LayerManaged      = "managed"       // <ManagedDir>/CLAUDE.md (org policy)
 	LayerUser         = "user"          // ~/.claude/CLAUDE.md
 	LayerUserRule     = "user-rule"     // ~/.claude/rules/*.md
 	LayerProject      = "project"       // <dir>/CLAUDE.md or <dir>/.claude/CLAUDE.md

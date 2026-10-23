@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -9,18 +10,19 @@ import (
 	"github.com/dansarpong/ccmanager/internal/memory"
 )
 
+// managedPolicyDir is this OS's managed-policy directory; a variable so
+// tests can keep the machine's real policy out of their results.
+var managedPolicyDir = memory.ManagedDir(runtime.GOOS)
+
 // memoryInput builds the pure engine's Input from the app config. The managed
-// policy path defaults to the Linux location and is simply absent on other
-// platforms or when the file does not exist.
+// policy files are simply absent when they don't exist on this machine.
 func (s *Server) memoryInput() memory.Input {
-	managed := ""
-	if runtime.GOOS == "linux" {
-		managed = "/etc/claude-code/CLAUDE.md"
-	}
 	return memory.Input{
-		ConfigRoot:  s.cfg.ConfigRoot,
-		ProjectsDir: s.cfg.ProjectsDir,
-		ManagedPath: managed,
+		ConfigRoot:          s.cfg.ConfigRoot,
+		ProjectsDir:         s.cfg.ProjectsDir,
+		ManagedPath:         filepath.Join(managedPolicyDir, "CLAUDE.md"),
+		ManagedSettingsPath: filepath.Join(managedPolicyDir, "managed-settings.json"),
+		GOOS:                runtime.GOOS,
 	}
 }
 
