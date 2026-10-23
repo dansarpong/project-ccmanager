@@ -258,7 +258,11 @@ func (s *Server) handleTrashRestore(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	entry, err := s.trash.Restore(id, time.Now())
-	if errors.Is(err, trash.ErrExists) {
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		http.Error(w, "that item is no longer in the trash", http.StatusNotFound)
+		return
+	case errors.Is(err, trash.ErrExists), errors.Is(err, trash.ErrBrokenLink):
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}

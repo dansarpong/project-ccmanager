@@ -132,6 +132,35 @@ func TestTrashRestoreConflictAndPlainBackupRestore(t *testing.T) {
 	assertContains(t, "trash", body, fmt.Sprintf(`action="/trash/%d/restore"`, backup), "Restore")
 }
 
+func TestTrashRestoreGoneAndBrokenLink(t *testing.T) {
+	h, tr, _, cfg := newTrashTestServer(t)
+	if rec := do(t, h, "POST", "/trash/99999/restore", nil, false); rec.Code != http.StatusNotFound {
+		t.Errorf("restoring an unknown id = %d, want 404", rec.Code)
+	}
+
+	target := filepath.Join(cfg.ConfigRoot, "AGENTS.md")
+	link := filepath.Join(cfg.ConfigRoot, "CLAUDE.md")
+	if err := os.WriteFile(target, []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("AGENTS.md", link); err != nil {
+		t.Fatal(err)
+	}
+	id, err := tr.BackupBeforeWrite(link, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+	rec := do(t, h, "POST", fmt.Sprintf("/trash/%d/restore", id), nil, false)
+	if rec.Code != http.StatusConflict {
+		t.Errorf("roll back onto a broken link = %d, want 409", rec.Code)
+	}
+	assertContains(t, "broken link", rec.Body.String(), "symlink to a missing file")
+	assertSymlink(t, link, "AGENTS.md")
+}
+
 func TestSessionDeleteAndRestoreKeepSidecar(t *testing.T) {
 	h, cfg := newTestServer(t)
 	proj := filepath.Join(cfg.ProjectsDir, "-work")
