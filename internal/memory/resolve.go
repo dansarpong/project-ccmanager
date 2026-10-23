@@ -55,7 +55,7 @@ func Resolve(in Input, workdir string) (*ResolvedStack, error) {
 	excludes := mergeExcludes(layers)
 
 	var sources []Source
-	for i, c := range collectCandidates(in, abs) {
+	for i, c := range Candidates(in, abs) {
 		s := readSource(c, excludes)
 		s.Order = i
 		sources = append(sources, s)
@@ -81,37 +81,59 @@ func Resolve(in Input, workdir string) (*ResolvedStack, error) {
 	return stack, nil
 }
 
-// candidate is a file we intend to load, with its layer, before reading it.
-type candidate struct {
-	path  string
-	layer string
+// Candidate is a memory file that loads at session start, found by stat alone.
+type Candidate struct {
+	Path  string // absolute file path
+	Layer string // one of the Layer* constants
+	Dir   string // the walked directory a project-layer file belongs to; "" for managed and user files
 }
 
-// collectCandidates lists every memory file to load, in Claude Code's load
-// order: broadest scope first (managed → user → user rules), then the
-// filesystem walk from root down to the working dir, where deeper directories
-// are read after shallower ones, and within a directory CLAUDE.local.md comes
-// after CLAUDE.md. User rules always precede project rules.
-func collectCandidates(in Input, workdir string) []candidate {
-	var out []candidate
+// Candidates lists every memory file that loads for workdir, in Claude Code's
+// load order, without reading any of them: broadest scope first (managed →
+// user → user rules), then the filesystem walk from root down to the working
+// dir, where deeper directories are read after shallower ones, and within a
+// directory CLAUDE.local.md comes after CLAUDE.md. User rules always precede
+// project rules. Resolve reads exactly these, in this order.
+func Candidates(in Input, workdir string) []Candidate {
+	return CandidatesAcross(in, []string{workdir})
+}
+
+// CandidatesAcross is the union of Candidates for several working directories:
+// each file appears once, at its first position, and a directory shared by
+// several working directories is only stat'ed once.
+func CandidatesAcross(in Input, workdirs []string) []Candidate {
+	var out []Candidate
 
 	if in.ManagedPath != "" {
-		out = append(out, candidate{in.ManagedPath, LayerManaged})
+		out = append(out, Candidate{Path: in.ManagedPath, Layer: LayerManaged})
 	}
 
 	if in.ConfigRoot != "" {
-		out = append(out, candidate{filepath.Join(in.ConfigRoot, "CLAUDE.md"), LayerUser})
+		out = append(out, Candidate{Path: filepath.Join(in.ConfigRoot, "CLAUDE.md"), Layer: LayerUser})
 		for _, r := range globRules(filepath.Join(in.ConfigRoot, "rules")) {
-			out = append(out, candidate{r, LayerUserRule})
+			out = append(out, Candidate{Path: r, Layer: LayerUserRule})
 		}
 	}
 
-	for _, dir := range dirsRootToWorkdir(workdir) {
-		out = append(out, candidate{filepath.Join(dir, "CLAUDE.md"), LayerProject})
-		out = append(out, candidate{filepath.Join(dir, "CLAUDE.local.md"), LayerProjectLocal})
-		out = append(out, candidate{filepath.Join(dir, ".claude", "CLAUDE.md"), LayerProject})
-		for _, r := range globRules(filepath.Join(dir, ".claude", "rules")) {
-			out = append(out, candidate{r, LayerProjectRule})
+	walked := map[string]bool{}
+	for _, workdir := range workdirs {
+		abs, err := filepath.Abs(workdir)
+		if err != nil {
+			continue
+		}
+		for _, dir := range dirsRootToWorkdir(abs) {
+			if walked[dir] {
+				continue
+			}
+			walked[dir] = true
+			out = append(out,
+				Candidate{filepath.Join(dir, "CLAUDE.md"), LayerProject, dir},
+				Candidate{filepath.Join(dir, "CLAUDE.local.md"), LayerProjectLocal, dir},
+				Candidate{filepath.Join(dir, ".claude", "CLAUDE.md"), LayerProject, dir},
+			)
+			for _, r := range globRules(filepath.Join(dir, ".claude", "rules")) {
+				out = append(out, Candidate{r, LayerProjectRule, dir})
+			}
 		}
 	}
 
@@ -121,17 +143,18 @@ func collectCandidates(in Input, workdir string) []candidate {
 	// the home dir), so the same file would otherwise be collected as both the
 	// user layer and a project layer.
 	seen := map[string]bool{}
-	var existing []candidate
+	var existing []Candidate
 	for _, c := range out {
-		abs, err := filepath.Abs(c.path)
+		abs, err := filepath.Abs(c.Path)
 		if err != nil {
-			abs = c.path
+			abs = c.Path
 		}
 		if seen[abs] || !fileExists(abs) {
 			continue
 		}
 		seen[abs] = true
-		existing = append(existing, candidate{abs, c.layer})
+		c.Path = abs
+		existing = append(existing, c)
 	}
 	return existing
 }
@@ -179,22 +202,22 @@ func globRules(dir string) []string {
 // readSource reads one candidate file, parses any paths: frontmatter, and
 // applies claudeMdExcludes, which can't exclude the managed CLAUDE.md. Read
 // errors are recorded, not returned.
-func readSource(c candidate, excludes []string) Source {
-	s := Source{Path: c.path, Layer: c.layer}
-	data, err := os.ReadFile(c.path)
+func readSource(c Candidate, excludes []string) Source {
+	s := Source{Path: c.Path, Layer: c.Layer}
+	data, err := os.ReadFile(c.Path)
 	if err != nil {
 		s.Err = err.Error()
 		return s
 	}
 	s.Raw = string(data)
 
-	if c.layer == LayerUserRule || c.layer == LayerProjectRule {
+	if c.Layer == LayerUserRule || c.Layer == LayerProjectRule {
 		if paths, ok := parsePathsFrontmatter(s.Raw); ok {
 			s.Conditional = true
 			s.Paths = paths
 		}
 	}
-	if c.layer != LayerManaged && matchesAny(c.path, excludes) {
+	if c.Layer != LayerManaged && matchesAny(c.Path, excludes) {
 		s.Excluded = true
 	}
 	return s
