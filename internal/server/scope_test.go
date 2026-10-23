@@ -100,6 +100,37 @@ func symlink(t *testing.T, target, path string) string {
 	return path
 }
 
+func TestClassifySymlinkedParentDirs(t *testing.T) {
+	root := t.TempDir()
+	roots := scopeRoots{
+		configRoot:       filepath.Join(root, "config"),
+		projectsDir:      filepath.Join(root, "config", "projects"),
+		managedPolicyDir: filepath.Join(root, "managed"),
+	}
+	mem := filepath.Join(roots.projectsDir, "-p", "memory")
+	dotfiles := filepath.Join(root, "dotfiles", "rules")
+	writeTestFile(t, filepath.Join(mem, "MEMORY.md"), "# index\n")
+	writeTestFile(t, filepath.Join(roots.managedPolicyDir, "policy.md"), "# policy\n")
+	writeTestFile(t, filepath.Join(dotfiles, "style.md"), "# style\n")
+	symlink(t, mem, filepath.Join(root, "a", ".claude", "rules"))
+	symlink(t, roots.managedPolicyDir, filepath.Join(root, "b", ".claude", "rules"))
+	symlink(t, dotfiles, filepath.Join(root, "c", ".claude", "rules"))
+
+	cases := []struct {
+		path string
+		want scope
+	}{
+		{filepath.Join(root, "a", ".claude", "rules", "MEMORY.md"), scopeAutoMemory},
+		{filepath.Join(root, "b", ".claude", "rules", "policy.md"), scopeManaged},
+		{filepath.Join(root, "c", ".claude", "rules", "style.md"), scopeEditable},
+	}
+	for _, c := range cases {
+		if got := classify(c.path, roots).scope; got != c.want {
+			t.Errorf("classify(%s) = %v, want %v", c.path, got, c.want)
+		}
+	}
+}
+
 func TestClassifySymlinks(t *testing.T) {
 	root := t.TempDir()
 	roots := scopeRoots{

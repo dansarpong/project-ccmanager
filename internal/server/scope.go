@@ -83,6 +83,9 @@ func classify(path string, roots scopeRoots) scopedFile {
 	}
 	sc := roots.pathScope(p)
 	if info.Mode().IsRegular() {
+		if real, err := filepath.EvalSymlinks(p); err == nil && real != p {
+			sc = roots.realScope(real, sc)
+		}
 		return scopedFile{scope: sc, target: p}
 	}
 	if sc == scopeOutside || info.Mode()&os.ModeSymlink == 0 {
@@ -119,6 +122,18 @@ func (r scopeRoots) linkTargetEditable(link, target string) bool {
 	}
 	dir, err := filepath.EvalSymlinks(filepath.Dir(link))
 	return err == nil && dir == filepath.Dir(target) && strings.EqualFold(filepath.Ext(target), ".md")
+}
+
+// realScope narrows sc for a regular file reached through a symlinked
+// directory: a file that really lives in managed policy or auto memory takes
+// that scope, so a symlinked .claude/rules can't open either to edits.
+func (r scopeRoots) realScope(real string, sc scope) scope {
+	for _, rr := range []scopeRoots{r, r.resolved()} {
+		if s := rr.pathScope(real); s == scopeManaged || s == scopeAutoMemory {
+			return s
+		}
+	}
+	return sc
 }
 
 // resolved returns r with symlinks in its directories resolved, where they
