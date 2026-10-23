@@ -123,6 +123,27 @@ func TestRestoredSessionIsPrivate(t *testing.T) {
 	assertMode(t, proj, 0o700)
 }
 
+func TestRestoreRecreatesMissingDirsPrivately(t *testing.T) {
+	tr, dir := setup(t)
+	rules := filepath.Join(dir, "repo", ".claude", "rules")
+	path := filepath.Join(rules, "x.md")
+	writeFile(t, path, "rule", 0o644)
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+
+	id, err := tr.MoveToTrash(KindMemoryDelete, path, "", "", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(dir, "repo", ".claude")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tr.Restore(id, now); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	assertFile(t, path, "rule", 0o644)
+	assertMode(t, rules, 0o700)
+}
+
 func TestMoveFallbackCopiesTrees(t *testing.T) {
 	failRename(t, syscall.EXDEV)
 	dir := t.TempDir()

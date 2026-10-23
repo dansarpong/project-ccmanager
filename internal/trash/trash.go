@@ -170,16 +170,14 @@ func (t *Trash) Restore(id int64, now time.Time) (store.TrashEntry, error) {
 			return e, fmt.Errorf("cannot restore: %s %w", s.to, ErrExists)
 		}
 	}
-	dirMode := os.FileMode(0o755)
 	if e.Kind == KindSession {
 		// Claude Code keeps transcripts owner-only; copies trashed by older
 		// versions lost that mode.
 		if err := os.Chmod(e.TrashPath, 0o600); err != nil {
 			return e, fmt.Errorf("restricting restored transcript: %w", err)
 		}
-		dirMode = 0o700
 	}
-	if err := os.MkdirAll(filepath.Dir(e.OriginalPath), dirMode); err != nil {
+	if err := os.MkdirAll(filepath.Dir(e.OriginalPath), 0o700); err != nil {
 		return e, fmt.Errorf("recreating original directory: %w", err)
 	}
 	if err := moveAll(steps); err != nil {
