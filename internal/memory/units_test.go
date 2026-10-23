@@ -10,6 +10,9 @@ func TestEncodeProjectDir(t *testing.T) {
 		"/home/dansarpong/ARMS/arms-infrastructure-as-code":   "-home-dansarpong-ARMS-arms-infrastructure-as-code",
 		"/home/dansarpong/Personal/others/claude-tests/uigen": "-home-dansarpong-Personal-others-claude-tests-uigen",
 		"/home/dansarpong": "-home-dansarpong",
+		"/home/u/Personal/others/boafo/.claude/worktrees/bold-noyce-8797c8": "-home-u-Personal-others-boafo--claude-worktrees-bold-noyce-8797c8",
+		"/home/u/my_proj.v2/": "-home-u-my-proj-v2",
+		"/home/u/café @ work": "-home-u-caf----work",
 	}
 	for in, want := range cases {
 		if got := EncodeProjectDir(in); got != want {

@@ -15,12 +15,9 @@ import (
 func resolveAutoMemory(in Input, workdir, projectRoot string) *AutoMemory {
 	dir := autoMemoryDir(in.ConfigRoot, workdir)
 	if dir == "" {
-		if in.ProjectsDir == "" {
-			return nil
-		}
-		dir = filepath.Join(in.ProjectsDir, EncodeProjectDir(projectRoot), "memory")
+		dir = projectMemoryDir(in.ProjectsDir, projectRoot)
 	}
-	if !fileOrDirExists(dir) {
+	if dir == "" || !fileOrDirExists(dir) {
 		return nil
 	}
 
@@ -49,6 +46,43 @@ func resolveAutoMemory(in Input, workdir, projectRoot string) *AutoMemory {
 	}
 	sort.Strings(am.TopicFiles)
 	return am
+}
+
+// projectMemoryDir returns ProjectsDir/<encoded root>/memory, or "" if it
+// can't be located. The hash Claude Code appends to an over-long name can't be
+// reproduced, so such a folder is found by its prefix, and only if one matches.
+func projectMemoryDir(projectsDir, root string) string {
+	if projectsDir == "" {
+		return ""
+	}
+	name := EncodeProjectDir(root)
+	if len(name) > maxProjectDirName {
+		name = uniqueLongerDir(projectsDir, name[:maxProjectDirName])
+		if name == "" {
+			return ""
+		}
+	}
+	return filepath.Join(projectsDir, name, "memory")
+}
+
+// uniqueLongerDir returns the one directory in parent whose name starts with,
+// and is longer than, prefix; "" if none or several do.
+func uniqueLongerDir(parent, prefix string) string {
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return ""
+	}
+	found := ""
+	for _, e := range entries {
+		if !e.IsDir() || len(e.Name()) <= len(prefix) || !strings.HasPrefix(e.Name(), prefix) {
+			continue
+		}
+		if found != "" {
+			return ""
+		}
+		found = e.Name()
+	}
+	return found
 }
 
 // headOf returns the first autoMemoryHeadLines lines or autoMemoryHeadBytes,
