@@ -22,8 +22,12 @@ type FileState struct {
 
 // AtomicWrite writes data to path atomically: a temp file in the same directory
 // is written, flushed, and renamed over path. Rename within a directory is
-// atomic on the platforms this tool targets.
+// atomic on the platforms this tool targets. If path is a symlink (e.g.
+// CLAUDE.md -> AGENTS.md), the link's target is written and the link is kept.
 func AtomicWrite(path string, data []byte, perm os.FileMode) error {
+	if target, err := filepath.EvalSymlinks(path); err == nil {
+		path = target
+	}
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".ccmanager-*.tmp")
 	if err != nil {
