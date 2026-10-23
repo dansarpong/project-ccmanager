@@ -3,8 +3,10 @@ package server
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 	"time"
 
@@ -89,4 +91,39 @@ func TestTrashRollBackSwapsBackup(t *testing.T) {
 	if got := readBody(t, path); got != "v2" {
 		t.Errorf("after undoing the roll back content = %q, want v2", got)
 	}
+}
+
+func TestSessionDeleteAndRestoreKeepSidecar(t *testing.T) {
+	h, cfg := newTestServer(t)
+	proj := filepath.Join(cfg.ProjectsDir, "-work")
+	transcript := filepath.Join(proj, testSessionID+".jsonl")
+	subagent := filepath.Join(proj, testSessionID, "subagents", "agent-a.jsonl")
+	if err := os.MkdirAll(filepath.Dir(subagent), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(subagent, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := do(t, h, "POST", "/sessions/"+testSessionID+"/delete", url.Values{"confirm": {"1"}}, false)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("delete = %d: %s", rec.Code, rec.Body.String())
+	}
+	for _, p := range []string{transcript, subagent} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s still in place after delete: %v", p, err)
+		}
+	}
+
+	m := regexp.MustCompile(`action="(/trash/\d+/restore)"`).FindStringSubmatch(do(t, h, "GET", "/trash", nil, false).Body.String())
+	if m == nil {
+		t.Fatal("trash page has no restore form")
+	}
+	if rec := do(t, h, "POST", m[1], nil, false); rec.Code != http.StatusSeeOther {
+		t.Fatalf("restore = %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := readBody(t, subagent); got != "{}\n" {
+		t.Errorf("restored subagent transcript = %q", got)
+	}
+	assertContains(t, "sessions", do(t, h, "GET", "/sessions", nil, false).Body.String(), "a3f9c2e1")
 }

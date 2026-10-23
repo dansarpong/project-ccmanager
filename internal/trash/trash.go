@@ -44,8 +44,9 @@ func New(st *store.Store, trashDir string) *Trash {
 }
 
 // MoveToTrash moves path into the trash directory and records a manifest entry.
-// now is passed in (rather than read from the clock) so callers and tests
-// control the timestamps. It returns the new entry's id.
+// A session transcript's sidecar folder moves with it. now is passed in (rather
+// than read from the clock) so callers and tests control the timestamps. It
+// returns the new entry's id.
 func (t *Trash) MoveToTrash(kind, path, sessionID, note string, now time.Time) (int64, error) {
 	return t.stash(kind, path, sessionID, note, now, true)
 }
@@ -77,6 +78,9 @@ func (t *Trash) stash(kind, path, sessionID, note string, now time.Time, move bo
 	}
 	dst := filepath.Join(sub, filepath.Base(path))
 	steps := []step{{from: path, to: dst}}
+	if side, ok := sidecar(path); ok && kind == KindSession {
+		steps = append(steps, step{from: side, to: strings.TrimSuffix(dst, ".jsonl")})
+	}
 	if move {
 		err = moveAll(steps)
 	} else if err = copyFile(path, dst); err == nil {
@@ -128,10 +132,23 @@ func (t *Trash) newEntryDir(now time.Time) (string, error) {
 	}
 }
 
-// Restore moves a trashed file back to its original path and removes the
-// manifest entry. It refuses to overwrite a file that already exists at the
-// original path, except for a backup: rolling back to one replaces the current
-// file, which is first backed up as a new entry dated now.
+// sidecar returns the folder Claude Code keeps beside a transcript (<id>.jsonl
+// has <id>/ holding subagents/, tool-results/ and the like), and whether there
+// is one. A trashed transcript keeps its sidecar beside it the same way.
+func sidecar(transcript string) (string, bool) {
+	dir, ok := strings.CutSuffix(transcript, ".jsonl")
+	if !ok {
+		return "", false
+	}
+	info, err := os.Lstat(dir)
+	return dir, err == nil && info.IsDir()
+}
+
+// Restore moves a trashed file, and a session's sidecar folder, back to the
+// original path and removes the manifest entry. It refuses to overwrite
+// anything already at the original path, except for a backup: rolling back to
+// one replaces the current file, which is first backed up as a new entry
+// dated now.
 func (t *Trash) Restore(id int64, now time.Time) (store.TrashEntry, error) {
 	e, err := t.store.GetTrash(id)
 	if err != nil {
@@ -140,8 +157,14 @@ func (t *Trash) Restore(id int64, now time.Time) (store.TrashEntry, error) {
 	if e.Kind == KindMemoryBackup && exists(e.OriginalPath) {
 		return e, t.rollBack(e, now)
 	}
-	if exists(e.OriginalPath) {
-		return e, fmt.Errorf("cannot restore: a file already exists at %s", e.OriginalPath)
+	steps := []step{{from: e.TrashPath, to: e.OriginalPath}}
+	if side, ok := sidecar(e.TrashPath); ok && e.Kind == KindSession {
+		steps = append(steps, step{from: side, to: strings.TrimSuffix(e.OriginalPath, ".jsonl")})
+	}
+	for _, s := range steps {
+		if exists(s.to) {
+			return e, fmt.Errorf("cannot restore: %s already exists", s.to)
+		}
 	}
 	dirMode := os.FileMode(0o755)
 	if e.Kind == KindSession {
@@ -155,7 +178,7 @@ func (t *Trash) Restore(id int64, now time.Time) (store.TrashEntry, error) {
 	if err := os.MkdirAll(filepath.Dir(e.OriginalPath), dirMode); err != nil {
 		return e, fmt.Errorf("recreating original directory: %w", err)
 	}
-	if err := moveAll([]step{{from: e.TrashPath, to: e.OriginalPath}}); err != nil {
+	if err := moveAll(steps); err != nil {
 		return e, err
 	}
 	_ = os.Remove(filepath.Dir(e.TrashPath)) // best-effort cleanup of the entry dir
