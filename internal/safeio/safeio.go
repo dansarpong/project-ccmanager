@@ -6,6 +6,7 @@
 package safeio
 
 import (
+	"crypto/rand"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,26 +21,46 @@ type FileState struct {
 	Size  int64
 }
 
+// rename is (*os.Root).Rename, swappable so tests can act just before it.
+var rename = (*os.Root).Rename
+
 // AtomicWrite writes data to path atomically: a temp file in the same directory
 // is written, flushed, and renamed over path. Rename within a directory is
 // atomic on the platforms this tool targets. If path is a symlink (e.g.
-// CLAUDE.md -> AGENTS.md), the link's target is written and the link is kept.
+// CLAUDE.md -> AGENTS.md), the link's target is written and the link is kept;
+// a missing path is created. The path is resolved once and every step after
+// goes through a handle on its directory, so a path component swapped
+// mid-write can't redirect the write elsewhere.
 func AtomicWrite(path string, data []byte, perm os.FileMode) error {
 	if target, err := filepath.EvalSymlinks(path); err == nil {
 		path = target
 	}
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".ccmanager-*.tmp")
+	dir, name := filepath.Dir(path), filepath.Base(path)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return fmt.Errorf("opening %s: %w", dir, err)
+	}
+	defer root.Close()
+
+	tmpName := ".ccmanager-" + rand.Text() + ".tmp"
+	tmp, err := root.OpenFile(tmpName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return fmt.Errorf("creating temp file in %s: %w", dir, err)
 	}
-	tmpName := tmp.Name()
-	// Clean up the temp file if anything below fails before the rename.
-	defer os.Remove(tmpName)
+	renamed := false
+	defer func() {
+		if !renamed {
+			_ = root.Remove(tmpName)
+		}
+	}()
 
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		return fmt.Errorf("writing temp file: %w", err)
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		return fmt.Errorf("setting permissions: %w", err)
 	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
@@ -48,12 +69,10 @@ func AtomicWrite(path string, data []byte, perm os.FileMode) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("closing temp file: %w", err)
 	}
-	if err := os.Chmod(tmpName, perm); err != nil {
-		return fmt.Errorf("setting permissions: %w", err)
-	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := rename(root, tmpName, name); err != nil {
 		return fmt.Errorf("renaming temp file into place: %w", err)
 	}
+	renamed = true
 	return nil
 }
 
