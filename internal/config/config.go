@@ -54,10 +54,17 @@ func findClaude() string {
 	return ""
 }
 
-// EnsureDataDirs creates the app's own directories (DataDir and TrashDir).
+// EnsureDataDirs creates the app's own directories (DataDir and TrashDir) and
+// makes them private to the user: they hold the text of every transcript.
 func (c Config) EnsureDataDirs() error {
-	if err := os.MkdirAll(c.TrashDir, 0o755); err != nil {
-		return fmt.Errorf("creating data dirs: %w", err)
+	for _, dir := range []string{c.DataDir, c.TrashDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fmt.Errorf("creating data dirs: %w", err)
+		}
+		// MkdirAll leaves an existing directory's mode alone.
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return fmt.Errorf("restricting %s: %w", dir, err)
+		}
 	}
 	return nil
 }
