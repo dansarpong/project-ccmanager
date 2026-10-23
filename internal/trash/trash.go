@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -216,20 +217,38 @@ func (t *Trash) EmptyNow() (int, error) {
 	return t.purge(all)
 }
 
+// purge deletes each entry's directory and manifest row. An entry that fails is
+// left in place and reported, without stopping the rest.
 func (t *Trash) purge(entries []store.TrashEntry) (int, error) {
 	n := 0
+	var errs []error
 	for _, e := range entries {
-		// Remove the trashed file and its entry directory; ignore if already gone.
-		if err := os.Remove(e.TrashPath); err != nil && !os.IsNotExist(err) {
-			return n, fmt.Errorf("purging %s: %w", e.TrashPath, err)
+		dir, err := t.entryDir(e.TrashPath)
+		if err == nil {
+			err = os.RemoveAll(dir)
 		}
-		_ = os.Remove(filepath.Dir(e.TrashPath))
-		if err := t.store.DeleteTrash(e.ID); err != nil {
-			return n, err
+		if err == nil {
+			err = t.store.DeleteTrash(e.ID)
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("purging trash entry %d: %w", e.ID, err))
+			continue
 		}
 		n++
 	}
-	return n, nil
+	return n, errors.Join(errs...)
+}
+
+// entryDir returns the entry directory that holds trashPath. Trash paths come
+// from the database and purge deletes the whole directory, so anything but a
+// direct child of the trash dir is refused.
+func (t *Trash) entryDir(trashPath string) (string, error) {
+	dir := filepath.Dir(filepath.Clean(trashPath))
+	rel, err := filepath.Rel(filepath.Clean(t.trashDir), dir)
+	if err != nil || rel == "." || rel == ".." || strings.ContainsRune(rel, filepath.Separator) {
+		return "", fmt.Errorf("%s is not in its own entry of the trash dir %s", trashPath, t.trashDir)
+	}
+	return dir, nil
 }
 
 // step is one move of a file or directory.
