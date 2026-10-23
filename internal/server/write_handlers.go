@@ -207,11 +207,26 @@ func (s *Server) handleTrashList(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, "listing trash", err)
 		return
 	}
+	rows := make([]trashRow, len(entries))
+	for i, e := range entries {
+		rows[i] = trashRow{TrashEntry: e}
+		if e.Kind == trash.KindMemoryBackup {
+			_, err := os.Lstat(e.OriginalPath)
+			rows[i].RollBack = err == nil
+		}
+	}
 	s.page(w, r, "trash.html", map[string]any{
 		"Title":   "Trash — ccmanager",
 		"Active":  "trash",
-		"Entries": entries,
+		"Entries": rows,
 	})
+}
+
+// trashRow is a trash entry as listed. RollBack marks a backup whose original
+// still exists, so restoring it replaces the current version.
+type trashRow struct {
+	store.TrashEntry
+	RollBack bool
 }
 
 func (s *Server) handleTrashRestore(w http.ResponseWriter, r *http.Request) {
@@ -221,6 +236,10 @@ func (s *Server) handleTrashRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	entry, err := s.trash.Restore(id, time.Now())
+	if errors.Is(err, trash.ErrExists) {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
 	if err != nil {
 		s.fail(w, "restoring", err)
 		return

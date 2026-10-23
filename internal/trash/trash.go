@@ -24,6 +24,10 @@ import (
 // RetentionDays is how long a trashed file can be restored before it is purged.
 const RetentionDays = 30
 
+// ErrExists means a restore was refused because something is already at the
+// original path.
+var ErrExists = errors.New("already exists")
+
 // Kinds of trash entries.
 const (
 	KindSession      = "session"       // a deleted transcript
@@ -163,7 +167,7 @@ func (t *Trash) Restore(id int64, now time.Time) (store.TrashEntry, error) {
 	}
 	for _, s := range steps {
 		if exists(s.to) {
-			return e, fmt.Errorf("cannot restore: %s already exists", s.to)
+			return e, fmt.Errorf("cannot restore: %s %w", s.to, ErrExists)
 		}
 	}
 	dirMode := os.FileMode(0o755)

@@ -93,6 +93,45 @@ func TestTrashRollBackSwapsBackup(t *testing.T) {
 	}
 }
 
+func TestTrashRestoreConflictAndPlainBackupRestore(t *testing.T) {
+	h, tr, _, cfg := newTrashTestServer(t)
+	notes := filepath.Join(cfg.ConfigRoot, "rules", "notes.md")
+	if err := os.MkdirAll(filepath.Dir(notes), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(notes, []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := tr.MoveToTrash(trash.KindMemoryDelete, notes, "", "", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(notes, []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rec := do(t, h, "POST", fmt.Sprintf("/trash/%d/restore", deleted), nil, false)
+	if rec.Code != http.StatusConflict {
+		t.Errorf("restore over an existing file = %d, want 409", rec.Code)
+	}
+	if got := readBody(t, notes); got != "new" {
+		t.Errorf("refused restore changed the file to %q", got)
+	}
+
+	// A backup whose original is gone offers a plain restore, not a roll back.
+	backup, err := tr.BackupBeforeWrite(notes, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(notes); err != nil {
+		t.Fatal(err)
+	}
+	body := do(t, h, "GET", "/trash", nil, false).Body.String()
+	if regexp.MustCompile(fmt.Sprintf(`hx-post="/trash/%d/restore"`, backup)).MatchString(body) {
+		t.Error("backup of a deleted file is offered as a roll back")
+	}
+	assertContains(t, "trash", body, fmt.Sprintf(`action="/trash/%d/restore"`, backup), "Restore")
+}
+
 func TestSessionDeleteAndRestoreKeepSidecar(t *testing.T) {
 	h, cfg := newTestServer(t)
 	proj := filepath.Join(cfg.ProjectsDir, "-work")
