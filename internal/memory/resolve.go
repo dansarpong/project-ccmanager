@@ -29,7 +29,7 @@ func Resolve(in Input, workdir string) (*ResolvedStack, error) {
 	stack := &ResolvedStack{Workdir: abs, ConfigRoot: in.ConfigRoot}
 
 	excludes := loadExcludes(in.ConfigRoot, abs)
-	projectRoot := findProjectRoot(abs)
+	r := findRepo(abs)
 
 	var sources []Source
 	for i, c := range collectCandidates(in, abs) {
@@ -40,7 +40,7 @@ func Resolve(in Input, workdir string) (*ResolvedStack, error) {
 
 	// Expand imports and strip comments per source, then collect graph edges.
 	for i := range sources {
-		expandSource(&sources[i], projectRoot)
+		expandSource(&sources[i], r.root)
 		for _, imp := range sources[i].Imports {
 			to := imp.ResolvedPath
 			if to == "" {
@@ -54,7 +54,7 @@ func Resolve(in Input, workdir string) (*ResolvedStack, error) {
 	}
 	stack.Sources = sources
 
-	stack.AutoMemory = resolveAutoMemory(in, abs, projectRoot)
+	stack.AutoMemory = resolveAutoMemory(in, abs, r.main)
 	return stack, nil
 }
 

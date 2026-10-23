@@ -21,7 +21,7 @@ func setupTree(t *testing.T) (in Input, workdir, projectRoot string) {
 	projectRoot = filepath.Join(root, "project")
 	workdir = filepath.Join(projectRoot, "a", "b", "workdir")
 
-	// Mark the project root as a git repo so findProjectRoot stops there.
+	// Mark the project root as a git repo so findRepo stops there.
 	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
 		t.Fatalf("creating .git marker: %v", err)
 	}

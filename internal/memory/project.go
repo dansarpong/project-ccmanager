@@ -1,26 +1,75 @@
 package memory
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 )
 
-// findProjectRoot returns the directory Claude Code treats as the project root:
-// the nearest ancestor containing a .git entry, walking up from workdir. If no
-// .git is found, the working directory itself is the root (matching Claude
-// Code's "outside a git repo, the project root is used" behaviour).
-func findProjectRoot(workdir string) string {
+// repo is where a working directory sits in git.
+type repo struct {
+	root  string // nearest ancestor with a .git entry; the working dir outside git
+	main  string // the main checkout's root, shared by all of a repo's worktrees
+	inGit bool
+}
+
+// findRepo walks up from workdir to the nearest .git entry. Outside a git repo
+// the working directory itself is the root (matching Claude Code's "outside a
+// git repo, the project root is used" behaviour). In a linked worktree, root
+// is the worktree and main is the checkout it was added from.
+func findRepo(workdir string) repo {
 	cur := workdir
 	for {
-		if fileOrDirExists(filepath.Join(cur, ".git")) {
-			return cur
+		git := filepath.Join(cur, ".git")
+		if info, err := os.Stat(git); err == nil {
+			r := repo{root: cur, main: cur, inGit: true}
+			if !info.IsDir() {
+				if main := mainCheckout(cur, git); main != "" {
+					r.main = main
+				}
+			}
+			return r
 		}
 		parent := filepath.Dir(cur)
 		if parent == cur {
-			return workdir
+			return repo{root: workdir, main: workdir}
 		}
 		cur = parent
 	}
+}
+
+// mainCheckout follows a worktree's .git file ("gitdir: <path>") and that
+// gitdir's commondir to the repository's .git directory, returning the checkout
+// that holds it. It returns "" for a .git file without a commondir (a
+// submodule) or a bare common dir, which keep their own root.
+func mainCheckout(root, gitFile string) string {
+	data, err := os.ReadFile(gitFile)
+	if err != nil {
+		return ""
+	}
+	first, _, _ := strings.Cut(string(data), "\n")
+	gitdir, ok := strings.CutPrefix(strings.TrimSpace(first), "gitdir:")
+	if !ok {
+		return ""
+	}
+	gitdir = resolveFrom(root, strings.TrimSpace(gitdir))
+	common, err := os.ReadFile(filepath.Join(gitdir, "commondir"))
+	if err != nil {
+		return ""
+	}
+	dir := resolveFrom(gitdir, strings.TrimSpace(string(common)))
+	if filepath.Base(dir) != ".git" {
+		return ""
+	}
+	return filepath.Dir(dir)
+}
+
+// resolveFrom resolves p against base unless it is already absolute.
+func resolveFrom(base, p string) string {
+	if filepath.IsAbs(p) {
+		return filepath.Clean(p)
+	}
+	return filepath.Join(base, p)
 }
 
 // isExternal reports whether target lies outside the project subtree rooted at

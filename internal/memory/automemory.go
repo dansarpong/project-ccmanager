@@ -9,13 +9,14 @@ import (
 
 // resolveAutoMemory locates the project's auto-memory directory and loads the
 // head of MEMORY.md (the only part Claude Code loads at session start). The
-// directory is normally ProjectsDir/<encoded(project-root)>/memory, but a
+// directory is normally ProjectsDir/<encoded(mainRoot)>/memory, where mainRoot
+// is the main checkout's root so every worktree of a repo shares it, but a
 // settings autoMemoryDirectory override takes precedence. Returns nil if no
 // memory directory can be found.
-func resolveAutoMemory(in Input, workdir, projectRoot string) *AutoMemory {
+func resolveAutoMemory(in Input, workdir, mainRoot string) *AutoMemory {
 	dir := autoMemoryDir(in.ConfigRoot, workdir)
 	if dir == "" {
-		dir = projectMemoryDir(in.ProjectsDir, projectRoot)
+		dir = projectMemoryDir(in.ProjectsDir, mainRoot)
 	}
 	if dir == "" || !fileOrDirExists(dir) {
 		return nil
