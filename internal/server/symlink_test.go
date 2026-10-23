@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dansarpong/ccmanager/internal/safeio"
 	"github.com/dansarpong/ccmanager/internal/trash"
@@ -117,4 +118,53 @@ func TestSaveThroughSymlinkBesideItsTarget(t *testing.T) {
 		t.Errorf("AGENTS.md after roll back = %q, want v1", got)
 	}
 	assertSymlink(t, link, "AGENTS.md")
+}
+
+func TestRollBackRefusesOriginalNowLinkedOutOfScope(t *testing.T) {
+	h, tr, st, cfg := newTrashTestServer(t)
+	path := filepath.Join(cfg.ConfigRoot, "work", "CLAUDE.md")
+	writeTestFile(t, path, "v1\n")
+	id, err := tr.BackupBeforeWrite(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bashrc := filepath.Join(t.TempDir(), ".bashrc")
+	writeTestFile(t, bashrc, "export SECRET_SAUCE=1\n")
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	symlink(t, bashrc, path)
+
+	rec := do(t, h, "POST", fmt.Sprintf("/trash/%d/restore", id), nil, false)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("roll back = %d, want 403: %s", rec.Code, rec.Body.String())
+	}
+	assertContains(t, "roll back refusal", rec.Body.String(), "symlink to "+bashrc)
+	if got := readBody(t, bashrc); got != "export SECRET_SAUCE=1\n" {
+		t.Errorf("refused roll back changed the target to %q", got)
+	}
+	assertSymlink(t, path, bashrc)
+	entries, err := st.ListTrash()
+	if err != nil || len(entries) != 1 || entries[0].ID != id {
+		t.Fatalf("trash after a refused roll back = %+v err=%v, want just the backup", entries, err)
+	}
+	if got := readBody(t, entries[0].TrashPath); got != "v1\n" {
+		t.Errorf("backup now holds %q", got)
+	}
+
+	// A broken link is left to Restore, which refuses to replace it.
+	gone := filepath.Join(filepath.Dir(bashrc), "gone.md")
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	symlink(t, gone, path)
+	rec = do(t, h, "POST", fmt.Sprintf("/trash/%d/restore", id), nil, false)
+	if rec.Code < 400 {
+		t.Fatalf("roll back onto a broken link = %d, want it refused", rec.Code)
+	}
+	assertContains(t, "broken link refusal", rec.Body.String(), "symlink to a missing file")
+	assertSymlink(t, path, gone)
+	if _, err := os.Lstat(gone); !os.IsNotExist(err) {
+		t.Errorf("refused roll back created the link's target: %v", err)
+	}
 }

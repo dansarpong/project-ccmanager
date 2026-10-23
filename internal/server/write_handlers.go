@@ -247,6 +247,16 @@ func (s *Server) handleTrashRestore(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad id", http.StatusBadRequest)
 		return
 	}
+	// A roll back writes through the backup's original path, which may since
+	// have left scope. A broken link there is refused by Restore itself.
+	if e, err := s.store.GetTrash(id); err == nil && e.Kind == trash.KindMemoryBackup {
+		if _, err := os.Stat(e.OriginalPath); !errors.Is(err, os.ErrNotExist) {
+			if f := s.memoryScope(e.OriginalPath); !f.editable() {
+				http.Error(w, f.editRefusal(), http.StatusForbidden)
+				return
+			}
+		}
+	}
 	entry, err := s.trash.Restore(id, time.Now())
 	if errors.Is(err, trash.ErrExists) {
 		http.Error(w, err.Error(), http.StatusConflict)
