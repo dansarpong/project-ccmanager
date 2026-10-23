@@ -56,7 +56,8 @@ type cliRunner struct {
 // No --bare: it breaks subscription auth (you get "Not logged in" even when
 // logged in), and no --setting-sources, which would drop apiKeyHelper and env
 // from user settings. Without --bare, claude loads the hooks, .mcp.json and
-// CLAUDE.md of its working directory, so command pins that to an empty one.
+// CLAUDE.md of its working directory, so command pins that to an empty one
+// under the data dir (ancestors' CLAUDE.md, such as ~/CLAUDE.md, still load).
 func cliArgs(systemPrompt string, strictMCP bool) []string {
 	args := []string{
 		"-p",
