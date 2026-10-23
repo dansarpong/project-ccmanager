@@ -247,10 +247,16 @@ func (s *Server) handleTrashRestore(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad id", http.StatusBadRequest)
 		return
 	}
-	// A roll back writes through the backup's original path, which may since
-	// have left scope. A broken link there is refused by Restore itself.
-	if e, err := s.store.GetTrash(id); err == nil && e.Kind == trash.KindMemoryBackup {
-		if _, err := os.Stat(e.OriginalPath); !errors.Is(err, os.ErrNotExist) {
+	// A restore writes back to the entry's original path, which may since have
+	// left scope or now lead elsewhere through a symlinked directory. A broken
+	// link there is refused by Restore itself.
+	if e, err := s.store.GetTrash(id); err == nil && e.Kind != trash.KindSession {
+		if _, err := os.Lstat(e.OriginalPath); errors.Is(err, os.ErrNotExist) {
+			if !s.restorable(e.OriginalPath) {
+				http.Error(w, e.OriginalPath+" now leads outside what ccmanager restores into", http.StatusForbidden)
+				return
+			}
+		} else if _, err := os.Stat(e.OriginalPath); e.Kind == trash.KindMemoryBackup && err == nil {
 			if f := s.memoryScope(e.OriginalPath); !f.editable() {
 				http.Error(w, f.editRefusal(), http.StatusForbidden)
 				return

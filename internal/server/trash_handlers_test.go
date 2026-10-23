@@ -161,6 +161,45 @@ func TestTrashRestoreGoneAndBrokenLink(t *testing.T) {
 	assertSymlink(t, link, "AGENTS.md")
 }
 
+func TestRestoreRefusesADirSwappedForASymlink(t *testing.T) {
+	h, tr, _, cfg := newTrashTestServer(t)
+	repo := filepath.Join(t.TempDir(), "repo")
+	rules := filepath.Join(repo, ".claude", "rules")
+	rule := filepath.Join(rules, "x.md")
+	writeTestFile(t, rule, "# planted\n")
+	id, err := tr.MoveToTrash(trash.KindMemoryDelete, rule, "", "", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A later pull turns the rules dir into a link to the user's agents.
+	agents := filepath.Join(cfg.ConfigRoot, "agents")
+	if err := os.MkdirAll(agents, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(rules); err != nil {
+		t.Fatal(err)
+	}
+	symlink(t, agents, rules)
+
+	rec := do(t, h, "POST", fmt.Sprintf("/trash/%d/restore", id), nil, false)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("restore through a swapped dir = %d, want 403", rec.Code)
+	}
+	if _, err := os.Lstat(filepath.Join(agents, "x.md")); !os.IsNotExist(err) {
+		t.Errorf("the restore wrote into the link's target: %v", err)
+	}
+
+	topic := filepath.Join(cfg.ProjectsDir, "-p", "memory", "topic.md")
+	writeTestFile(t, topic, "# topic\n")
+	id, err = tr.MoveToTrash(trash.KindMemoryDelete, topic, "", "", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec := do(t, h, "POST", fmt.Sprintf("/trash/%d/restore", id), nil, false); rec.Code != http.StatusSeeOther {
+		t.Errorf("restoring auto memory = %d, want 303", rec.Code)
+	}
+}
+
 func TestSessionDeleteAndRestoreKeepSidecar(t *testing.T) {
 	h, cfg := newTestServer(t)
 	proj := filepath.Join(cfg.ProjectsDir, "-work")
