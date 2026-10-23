@@ -58,7 +58,7 @@ func (s *Server) handleAdvisorAnalyze(w http.ResponseWriter, r *http.Request) {
 	default: // rewrite
 		var edits []editView
 		for _, src := range stack.Sources {
-			if src.Excluded || src.Raw == "" || s.isAutoMemory(src.Path) {
+			if src.Excluded || src.Raw == "" || !s.memoryScope(src.Path).editable() {
 				continue
 			}
 			sugs, err := s.advisor.RewriteFile(ctx, src.Path, src.Raw)
@@ -109,8 +109,8 @@ func (s *Server) handleAdvisorApply(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing fields", http.StatusBadRequest)
 		return
 	}
-	if !s.isEditable(file) {
-		http.Error(w, "file is not editable", http.StatusForbidden)
+	if sc := s.memoryScope(file); !sc.editable() {
+		http.Error(w, sc.editRefusal(), http.StatusForbidden)
 		return
 	}
 

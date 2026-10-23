@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -17,41 +16,14 @@ import (
 	"github.com/dansarpong/ccmanager/internal/trash"
 )
 
-// isAutoMemory reports whether path lives inside a project's auto-memory
-// directory (…/projects/<proj>/memory/…). Auto-memory is view-and-delete only:
-// Claude Code writes it during sessions, so the app must never edit it.
-func (s *Server) isAutoMemory(path string) bool {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return false
-	}
-	projects, err := filepath.Abs(s.cfg.ProjectsDir)
-	if err != nil {
-		return false
-	}
-	rel, err := filepath.Rel(projects, abs)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return false
-	}
-	// rel looks like "<proj>/memory/..." for auto-memory files.
-	parts := strings.Split(filepath.ToSlash(rel), "/")
-	return len(parts) >= 2 && parts[1] == "memory"
-}
-
-// isEditable reports whether the app may edit a memory file. CLAUDE.md,
-// CLAUDE.local.md, and rule files are editable; auto-memory is not.
-func (s *Server) isEditable(path string) bool {
-	return !s.isAutoMemory(path)
-}
-
 func (s *Server) handleMemoryEdit(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
 	if path == "" {
 		http.Error(w, "missing path", http.StatusBadRequest)
 		return
 	}
-	if !s.isEditable(path) {
-		http.Error(w, "auto-memory is view-and-delete only and cannot be edited", http.StatusForbidden)
+	if sc := s.memoryScope(path); !sc.editable() {
+		http.Error(w, sc.editRefusal(), http.StatusForbidden)
 		return
 	}
 	data, err := os.ReadFile(path)
@@ -86,8 +58,12 @@ func (s *Server) handleMemorySave(w http.ResponseWriter, r *http.Request) {
 	token := r.FormValue("token")
 	force := r.FormValue("force") == "1"
 
-	if path == "" || !s.isEditable(path) {
-		http.Error(w, "file is not editable", http.StatusForbidden)
+	if path == "" {
+		http.Error(w, "missing path", http.StatusBadRequest)
+		return
+	}
+	if sc := s.memoryScope(path); !sc.editable() {
+		http.Error(w, sc.editRefusal(), http.StatusForbidden)
 		return
 	}
 
@@ -139,6 +115,10 @@ func (s *Server) handleMemoryDelete(w http.ResponseWriter, r *http.Request) {
 	path := r.FormValue("path")
 	if path == "" {
 		http.Error(w, "missing path", http.StatusBadRequest)
+		return
+	}
+	if sc := s.memoryScope(path); !sc.deletable() {
+		http.Error(w, sc.deleteRefusal(), http.StatusForbidden)
 		return
 	}
 	kind := trash.KindMemoryDelete
