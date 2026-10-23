@@ -82,13 +82,14 @@ This tool can change and delete your files, so it is conservative by design:
   `127.0.0.1` or `localhost`, which defeats DNS rebinding, and any request that
   changes something must come from ccmanager's own pages (Go's
   `http.CrossOriginProtection`). Another website open in your browser can't
-  trigger a delete or an edit.
+  trigger a delete or an edit, and every response forbids framing, so it can't
+  load ccmanager in a hidden frame and steer your clicks either.
 - **Trash with 30-day restore.** Deleting a session or a memory file moves it
   into `<config-dir>/ccmanager/trash/` with a manifest entry; it is restorable
   for 30 days, then purged. A session's sidecar folder (`<id>/`, holding subagent
   transcripts and large tool results) moves with its transcript and comes back
   with it. Moves are renames, so permissions are kept. Purge runs
-  opportunistically on launch, and there is an "Empty now" action.
+  opportunistically on launch, and there is an "Empty trash" action.
 - **Private by default.** `<config-dir>/ccmanager/` and its trash are `0700` and
   the index is `0600`: the index holds the text of every transcript, so it gets
   the owner-only access Claude Code gives the transcripts themselves.
@@ -101,7 +102,10 @@ This tool can change and delete your files, so it is conservative by design:
   in, after backing up the version it replaces, so a roll back can be undone too.
 - **Scoped edits.** Only `CLAUDE.md`, `CLAUDE.local.md` and rules files
   (`~/.claude/rules/` and any `.claude/rules/`) can be edited; those and auto
-  memory can be deleted. Managed policy is view-only. Any other path gets a 403.
+  memory can be deleted. Managed policy is view-only. Any other path gets a 403,
+  and a path with no file a 404. A symlinked memory file is edited only when its
+  target is in scope too (another memory file, or a `.md` beside the link, as
+  with `CLAUDE.md` → `AGENTS.md`); deleting one moves the link, not its target.
 - **Change detection.** When you open a file to edit, ccmanager records its
   mtime+size. If the file changed on disk before you save (e.g. Claude Code
   edited it), you get a conflict warning and must confirm before overwriting.
@@ -250,7 +254,8 @@ banner and the static lint keeps working regardless.
 
 The JSONL/transcript layout is not a stable contract and shifts between Claude
 Code versions, so ccmanager confirms what it can at runtime and isolates its
-assumptions in a few places. These were verified against **Claude Code 2.1.186/187**:
+assumptions in a few places. These were verified against **Claude Code 2.1.186/187**,
+and the sidecar folder, folder-name encoding and advisor flags against **2.1.309**:
 
 - **The working directory comes from the `cwd` recorded inside the transcript**,
   never from decoding the `projects/<name>` folder name. (`sessions/scan.go`)
